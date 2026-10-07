@@ -1,0 +1,22 @@
+{
+ "voronoi": {
+  "image": "render_voronoi.png",
+  "scripts": [
+   "#runover prim\n@Cd = hsvtorgb(set(cellrand(v@P, chf(\"cells\", 4)), 0.7, 0.85));"
+  ]
+ },
+ "greebles": {
+  "image": "render_greebles.png",
+  "scripts": [
+   "#runover prim\nif (rand(@primnum + chi(\"seed\", 0)) < chf(\"amount\", 0.35)) {\n    extrude(fit01(rand(@primnum + 17), chf(\"Height/min\", 0.05), chf(\"Height/max\", 0.4)), 1);\n}",
+   "@Cd = colorramp(\"palette\", relbbox(0, v@P).z, \"terrain\");"
+  ]
+ },
+ "displace": {
+  "image": "render_displace.png",
+  "scripts": [
+   "float n = snoise(v@P, chf(\"scale\", 2.5));\n@P += v@N * n * chf(\"strength\", 0.25);\nf@displacement = n;\nshadesmooth(1);",
+   "@Cd = colorramp(\"heat\", fit(f@displacement, -0.7, 0.7, 0, 1), \"magma\");"
+  ]
+ }
+}

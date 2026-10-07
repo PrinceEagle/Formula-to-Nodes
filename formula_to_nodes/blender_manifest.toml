@@ -1,0 +1,24 @@
+schema_version = "1.0.0"
+
+id = "formula_to_nodes"
+version = "3.0.0"
+name = "Formula to Nodes"
+tagline = "Type VEX-style formulas or describe an effect, get node groups"
+maintainer = "Formula to Nodes <contact@princeeagle.com>"
+
+type = "add-on"
+
+tags = ["Geometry Nodes", "Node"]
+
+blender_version_min = "5.2.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+[permissions]
+network = "Send prompts to the AI provider you configure"
+clipboard = "Copy and paste scripts and AI prompts"
+files = "Add this add-on to the Claude Desktop MCP config on request"
+
+# Pure Python, standard library only. No wheels, no bundled binaries.
