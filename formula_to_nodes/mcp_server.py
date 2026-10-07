@@ -34,11 +34,10 @@ def _load_package():
     pkg = importlib.util.module_from_spec(spec)
     sys.modules[PKG] = pkg
     spec.loader.exec_module(pkg)
-    return (importlib.import_module(PKG + ".compiler"), importlib.import_module(PKG + ".ai"),
-            importlib.import_module(PKG + ".lang"))
+    return tuple(importlib.import_module(f"{PKG}.{m}") for m in ("compiler", "ai", "lang", "recipes", "caps"))
 
 
-compiler, ai, lang = _load_package()
+compiler, ai, lang, recipes, caps = _load_package()
 VERSION = getattr(sys.modules[PKG], "ADDON_VERSION", "2")
 
 
@@ -156,6 +155,22 @@ TOOLS = [
     {"name": "formula_get_source",
      "description": "Get the script of an existing Formula group, to edit it and rebuild with update_group.",
      "inputSchema": {"type": "object", "properties": {"group": {"type": "string"}}, "required": ["group"]}},
+    {"name": "formula_list_recipes",
+     "description": "The built-in recipe library (masks, deformers, scatter, growth, effectors, colour, curves, "
+                    "modeling, utility). Optional query filters by words. Use formula_get_recipe for a script.",
+     "inputSchema": {"type": "object", "properties": {
+         "query": {"type": "string", "description": "Words to search for, e.g. 'scatter rocks'"}}}},
+    {"name": "formula_get_recipe",
+     "description": "The script of a recipe (from formula_list_recipes), ready for formula_build or to adapt.",
+     "inputSchema": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}},
+    {"name": "formula_capabilities",
+     "description": "Which optional features (lists, bundles, string fields, ...) the running Blender supports. "
+                    "Falls back to the minimum supported version when Blender isn't reachable.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "formula_decompile",
+     "description": "Convert any Geometry Nodes group in the open file into a Formula to Nodes script "
+                    "(like turning a VOP network into a wrangle). Notes list what couldn't be converted.",
+     "inputSchema": {"type": "object", "properties": {"group": {"type": "string"}}, "required": ["group"]}},
     {"name": "blender_scene_overview",
      "description": "Objects in the current scene (type, selection, modifiers) and the Blender version.",
      "inputSchema": {"type": "object", "properties": {}}},
@@ -200,6 +215,27 @@ def call_tool(bridge, name, args):
         return bridge.call("list_groups"), False
     if name == "formula_get_source":
         r = bridge.call("group_source", group=args.get("group", ""))
+        return r, not r.get("ok", False)
+    if name == "formula_list_recipes":
+        found = recipes.search(args["query"]) if args.get("query") else recipes.RECIPES
+        return {"recipes": [{"key": r.key, "title": r.title, "category": r.category,
+                             "description": r.description} for r in found]}, False
+    if name == "formula_get_recipe":
+        r = recipes.BY_KEY.get(args.get("key", ""))
+        if r is None:
+            return {"ok": False, "error": f"no recipe '{args.get('key', '')}' — see formula_list_recipes"}, True
+        return {"ok": True, "key": r.key, "title": r.title, "description": r.description, "script": r.script,
+                "needs": list(r.needs)}, False
+    if name == "formula_capabilities":
+        try:
+            return bridge.call("capabilities"), False
+        except BridgeError:
+            t = caps.Target(caps.DEFAULT_TARGET)
+            return {"ok": True, "blender": f"{caps.version_str(t.version)} (assumed — Blender isn't connected)",
+                    "features": [{"feature": k, "available": ok, "detail": text}
+                                 for k, ok, text in caps.report(t)]}, False
+    if name == "formula_decompile":
+        r = bridge.call("decompile_group", group=args.get("group", ""))
         return r, not r.get("ok", False)
     if name == "blender_scene_overview":
         return bridge.call("scene_overview"), False

@@ -1,3 +1,47 @@
+# Formula to Nodes 3.0.0
+
+A much bigger language, closer to Houdini VEX, plus recipes and nodes → script.
+
+## Language
+- **Run over any domain**: `#runover prim` (or vertex, edge, curve, instance, detail) and
+  `runover(prim) { ... }` blocks. Detail attributes (`runover(detail)`, `detail()`,
+  `setdetailattrib()`) are stored in geometry bundles.
+- **Types**: rotations (`vector4`/`p@`), 4x4 matrices (`matrix`/`4@`), colours (`c@`), 2D UVs (`u@`),
+  strings (`s@` text attributes need Blender 5.3), objects/collections/materials/images/sounds as parameters.
+- **Arrays** (Blender 5.2 lists): `float vals[] = {1, 2, 3};`, indexing, `len`, `append`, `insert`,
+  `removeindex`, `resize`, `sort`, `sum`, `min`/`max`/`avg`, `find`, `foreach (float v; vals)`.
+- **Functions** with typed parameters (passed by reference, like VEX), `return`, overloads.
+- **Loops**: C-style `for`, `foreach`, `repeat(n)`; short fixed loops unroll, others become repeat zones.
+- **Preprocessor**: `#define`, `#include` (bundled `falloff.h`, `sdf.h`, `shaping.h`, `color.h`,
+  `noise.h`, or your own text blocks), `#pragma`.
+- **Geometry operations**: scatter, instance, realize, subdivide, subdivsurf, triangulate, dualmesh,
+  convexhull, fuse, extrude, bevel, resample, sweep, tocurves, topoints, points, grid, join, transform,
+  setmaterial, shadesmooth, flipfaces, sortpoints, removepoint/removeprim, addpoint.
+- **185 new function names** (99 → 284): lookups (`point`, `prim`, `nearpoint`, `xyzdist`, `primuv`, `intersect`,
+  ray casts, `volumesample`, `texture`), topology (`neighbour`, `primpoint`, ...), aggregates
+  (`sumof`, `avgof`, `minof`, ... with an optional group or domain), rotations and matrices
+  (`quaternion`, `slerp`, `dihedral`, `lookat`, `maketransform`, ...), colour, text (`sprintf`,
+  `printf`/`warning`/`error` shown as node warnings), noise (`curlnoise`, `flownoise`, `gabor`, worley).
+- **Ramps**: `chramp("name", x, "preset")` / `colorramp(...)` with presets; edited shapes survive rebuilds.
+- **Parameters** get panels (`chf("Folder/name")`), ranges and tooltips (`min=`, `max=`, `tip=`).
+
+## Recipes
+51 ready-made scripts in 9 categories (masks, deformers, scatter & instance, growth & simulation,
+effectors, colour, curves, modeling, utility): Script panel › **Recipes**, or `formula_list_recipes` over MCP.
+
+## Nodes → script
+**Convert Nodes to Script** turns any Geometry Nodes group into a script (like VOPs → wrangle).
+Anything without an equivalent is listed in notes, never silently changed.
+
+## Blender versions
+Capability checks tell you which features your Blender has (string attributes need 5.3); the AI
+prompt and the function reference only show what the running Blender supports.
+
+## AI / MCP
+- Default model `claude-sonnet-5-5`, with server-side fallback to another model when it's overloaded,
+  clearer refusals, 16k output tokens and a 180 s timeout.
+- New MCP tools: `formula_list_recipes`, `formula_get_recipe`, `formula_capabilities`, `formula_decompile`.
+
 # Formula to Nodes 2.1.0
 
 ## New: Claude Desktop / Claude Code via MCP

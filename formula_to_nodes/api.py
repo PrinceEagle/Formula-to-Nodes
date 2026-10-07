@@ -8,7 +8,7 @@ function returns a JSON-serializable dict.
 
 import bpy
 
-from . import build, compiler, ui
+from . import build, caps, compiler, decompile, ui
 from .lang import FormulaError
 
 
@@ -52,7 +52,7 @@ def _undo_push(message):
 
 def build_group(script, name="Formula", update_group="", object_name="", mode="SCRIPT"):
     try:
-        result = compiler.compile_source(script, mode)
+        result = compiler.compile_source(script, mode, target=caps.from_blender(bpy))
     except FormulaError as e:
         return _err(str(e), line=e.line)
 
@@ -215,3 +215,23 @@ def scene_overview():
     return {"ok": True, "blender": bpy.app.version_string, "file": bpy.data.filepath or "(unsaved)",
             "frame": bpy.context.scene.frame_current, "objects": objs,
             "formula_groups": [g["name"] for g in list_groups()["groups"]]}
+
+
+def decompile_group(group):
+    """Any Geometry Nodes group → a Formula to Nodes script (with notes on what didn't convert)."""
+    tree = bpy.data.node_groups.get(group)
+    if tree is None:
+        return _err(f"no node group named '{group}'")
+    if tree.bl_idname != "GeometryNodeTree":
+        return _err(f"'{group}' isn't a Geometry Nodes group")
+    try:
+        script, notes = decompile.decompile(decompile.extract(tree))
+    except Exception as e:      # an unusual tree shouldn't take the bridge down
+        return _err(f"couldn't convert '{group}': {e}")
+    return {"ok": True, "group": tree.name, "script": script, "notes": notes}
+
+
+def capabilities():
+    t = caps.from_blender(bpy)
+    return {"ok": True, "blender": caps.version_str(t.version),
+            "features": [{"feature": k, "available": ok, "detail": text} for k, ok, text in caps.report(t)]}

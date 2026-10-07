@@ -581,6 +581,9 @@ def _find_top(s, ch):
 def preprocess(text):
     """VEX-flavoured expression text → Python expression source."""
     code, saved = _protect_strings(text.strip())
+    if re.search(r"(?<![\w@])[fivbspcu34]\[\]@", code):
+        raise FormulaError("array attributes (f[]@name) aren't possible in Blender — attributes hold one value "
+                           "per element; use an array variable (float a[] = ...) or several attributes")
     code = code.replace("&&", " and ").replace("||", " or ")
     code = re.sub(r"!(?!=)", " not ", code)
     code = code.replace("^", "**")
@@ -859,6 +862,18 @@ class _Parser:
                 raise self._err("malformed for — expected for (init; condition; step) { ... }", line)
             inner, _ = self._block([("stmt", kp[1], line)], 0, closing=False, open_line=line)
             return [self._make_block("for", kp[0], inner, line, f"for ({kp[0]})")], i + 1
+        if re.match(r"foreach\s*\(", text):
+            kp = _keyword_paren(text, "foreach")
+            if kp is None or not kp[1]:
+                raise self._err("malformed foreach — expected foreach (float x; values) { ... }", line)
+            kind = "forarr" if ";" in kp[0] else "foreach"
+            inner, _ = self._block([("stmt", kp[1], line)], 0, closing=False, open_line=line)
+            return [self._make_block(kind, kp[0], inner, line, f"foreach ({kp[0]})")], i + 1
+        if re.match(r"repeat\s*\(", text):
+            kp = _keyword_paren(text, "repeat")
+            if kp is not None and kp[1]:
+                inner, _ = self._block([("stmt", kp[1], line)], 0, closing=False, open_line=line)
+                return [self._make_block("repeat", kp[0], inner, line, f"repeat ({kp[0]})")], i + 1
         if re.match(r"(while|do)\b", text):
             raise self._err("while/do loops aren't supported — use for (int i = 0; i < n; i++) { } "
                             "or repeat(n) { }", line)

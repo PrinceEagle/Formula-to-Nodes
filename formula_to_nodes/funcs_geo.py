@@ -34,6 +34,12 @@ reg("hasprimattrib", 'hasprimattrib(geo, "name")', "does the attribute exist", "
 reg("hasvertexattrib", 'hasvertexattrib(geo, "name")', "does the attribute exist", "Geometry", "f_hasattrib")
 reg("hasdetailattrib", 'hasdetailattrib(geo, "name")', "does the detail attribute exist", "Geometry",
     "f_hasdetail", feature="geometry_bundles")
+reg("objpos", 'objpos(obj)', 'location of an object (chobj("x") or an input number) — effectors, targets',
+    "Geometry", "f_objinfo", out="Location")
+reg("objrot", 'objrot(obj)', "rotation of an object", "Geometry", "f_objinfo", out="Rotation")
+reg("objscale", 'objscale(obj)', "scale of an object", "Geometry", "f_objinfo", out="Scale")
+reg("optransform", 'optransform(obj)', "4x4 transform of an object (relative to this one)", "Geometry",
+    "f_objinfo", out="Transform")
 reg("curvepos", "curvepos(geo, curve, t)", "position at 0..1 along a curve", "Geometry", "f_curvesample", out="Position")
 reg("curvetangent", "curvetangent(geo, curve, t)", "tangent at 0..1 along a curve", "Geometry", "f_curvesample",
     out="Tangent")
@@ -91,7 +97,8 @@ for _n, _op, _doc in [("sumof", "sum", "sum over all elements (or per group)"),
                       ("stdevof", "stdev", "standard deviation (or per group)"),
                       ("varianceof", "variance", "variance (or per group)"),
                       ("countof", "count", "how many elements the condition is true for (or per group)")]:
-    reg(_n, "NAME(value [, group])", _doc, "Aggregates", "f_aggregate", op=_op)
+    reg(_n, 'NAME(value [, group] [, "prim"])', _doc + "; a domain name picks what to aggregate over",
+        "Aggregates", "f_aggregate", op=_op)
 reg("accumulate", "accumulate(value [, group])", "running total in element order", "Aggregates", "f_accumulate")
 reg("blur", "blur(value, iterations [, weight])", "averages with mesh/curve neighbours (smoothing)", "Aggregates",
     "f_blur")
@@ -150,6 +157,29 @@ class GeoFuncs:
         v = self.param(f"Input {n}", OBJECT, None, explicit=True,
                        description=f"Object used as input {n}: point({n}, ...), @opinput{n}_name, xyzdist({n}, ...)")
         return self.object_geometry(v)
+
+    def obj_arg(self, node, fname):
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) \
+                and not isinstance(node.value, bool):
+            n = int(node.value)
+            if not 1 <= n <= 9:
+                raise FormulaError(f"{fname}(): use an input number 1..9 or chobj(\"name\")")
+            return self.param(f"Input {n}", OBJECT, None, explicit=True,
+                              description=f"Object used as input {n}")
+        v = self.expr(node)
+        if v.t != OBJECT:
+            raise FormulaError(f'{fname}() needs an object: chobj("name") or an input number')
+        return v
+
+    def f_objinfo(self, node, name):
+        if len(node.args) != 1:
+            raise FormulaError(f'{name}() takes {name}(chobj("name"))')
+        obj = self.obj_arg(node.args[0], name)
+        out = FUNCS[name].data["out"]
+        n = self.g.add("GeometryNodeObjectInfo", {"transform_space": "RELATIVE"},
+                       {"Object": obj.o, "As Instance": False})
+        t = {"Location": VECTOR, "Rotation": ROTATION, "Scale": VECTOR, "Transform": MATRIX}[out]
+        return Val(t, o=n.out(out), field=False)
 
     def object_geometry(self, v):
         n = self.g.add("GeometryNodeObjectInfo", {"transform_space": "RELATIVE"},
@@ -605,9 +635,23 @@ class GeoFuncs:
     _STAT_OUT = {"sum": "Sum", "mean": "Mean", "min": "Min", "max": "Max", "median": "Median",
                  "stdev": "Standard Deviation", "variance": "Variance", "count": "Sum"}
 
+    def _domain_arg(self, args, name):
+        """Optional trailing domain name ("prim", "point", ...): what an aggregate runs over."""
+        if len(args) >= 2 and isinstance(args[-1], ast.Constant) and isinstance(args[-1].value, str):
+            word = args[-1].value.strip().lower()
+            dom = RUNOVER_DOMAINS.get(word)
+            if dom is None or dom == "DETAIL":
+                raise FormulaError(f'{name}(): "{word}" isn\'t a domain — use "point", "prim", "vertex", "edge", '
+                                   f'"curve" or "instance"')
+            return args[:-1], dom
+        return args, None
+
     def f_aggregate(self, node, name):
         op = FUNCS[name].data["op"]
-        vals = self.args(node, name, {1, 2})
+        args, dom_arg = self._domain_arg(list(node.args), name)
+        if len(args) not in (1, 2):
+            raise FormulaError(f"{name}() takes {FUNCS[name].sig}")
+        vals = [self.expr(a) for a in args]
         x = vals[0]
         if op == "count":
             x = self.coerce(self.as_bool(x, "countof()'s condition"), FLOAT)
@@ -615,7 +659,7 @@ class GeoFuncs:
             raise FormulaError(f"{name}() works on numbers and vectors, not {type_word(x.t)}")
         vec = x.t == VECTOR
         xin = x if vec else self.coerce(x, FLOAT, f"{name}()'s value")
-        dom = self.field_domain()
+        dom = dom_arg or self.field_domain()
         if len(vals) == 1:
             n = self.g.add("GeometryNodeAttributeStatistic",
                            {"data_type": "FLOAT_VECTOR" if vec else "FLOAT", "domain": dom},

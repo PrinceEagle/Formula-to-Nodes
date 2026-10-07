@@ -10,7 +10,7 @@ from bpy.types import AddonPreferences, Menu, Operator, Panel, PropertyGroup
 
 import sys
 
-from . import ai, build, compiler, examples, mcp_setup
+from . import ai, build, caps, compiler, decompile, examples, libs, mcp_setup, recipes
 from .lang import FormulaError
 
 ADDON_ID = __package__
@@ -81,12 +81,22 @@ def tag_redraw_node_editors():
                 area.tag_redraw()
 
 
+def _text_lookup(name):
+    text = bpy.data.texts.get(name) or bpy.data.texts.get(name + ".h")
+    return text.as_string() if text is not None else None
+
+
+def compile_options():
+    """Target (what this Blender supports) and #include resolver (text datablocks first)."""
+    return {"target": caps.from_blender(bpy), "resolver": libs.make_resolver(_text_lookup)}
+
+
 def compile_and_build(context, space, source, mode, output, report):
     """Compile, then rebuild the active formula group or add a new one.
     Returns True on success. All user feedback goes through status + report."""
     s = settings(context)
     try:
-        result = compiler.compile_source(source, mode, output)
+        result = compiler.compile_source(source, mode, output, **compile_options())
     except FormulaError as e:
         set_status(s, "ERROR", str(e), e.line or -1)
         report({"ERROR"}, str(e))
@@ -196,7 +206,7 @@ class FORMULA_AP_Preferences(AddonPreferences):
                     "ANTHROPIC_API_KEY / OPENAI_API_KEY environment variable instead")
     model: StringProperty(name="Model", description="Leave empty for the provider default")
     endpoint: StringProperty(name="Endpoint URL", description="Leave empty for the provider default")
-    timeout: IntProperty(name="Timeout (s)", default=90, min=10, max=600)
+    timeout: IntProperty(name="Timeout (s)", default=180, min=10, max=600)
     max_attempts: IntProperty(name="Attempts", default=3, min=1, max=6,
                               description="How many times to ask the model to fix compile errors")
 
@@ -282,7 +292,8 @@ class FORMULA_OT_Check(Operator):
         s = settings(context)
         src = s.formula if self.target == "FORMULA" else script_text(s)
         try:
-            res = compiler.compile_source(src, self.target, s.output_type if self.target == "FORMULA" else "AUTO")
+            res = compiler.compile_source(src, self.target, s.output_type if self.target == "FORMULA" else "AUTO",
+                                          **compile_options())
         except FormulaError as e:
             set_status(s, "ERROR", str(e), e.line or -1)
             self.report({"ERROR"}, str(e))
@@ -338,6 +349,59 @@ class FORMULA_OT_LoadExample(Operator):
         s = settings(context)
         set_script_text(s, ex[3])
         set_status(s, "INFO", f"Loaded example: {ex[1]}")
+        return {"FINISHED"}
+
+
+class FORMULA_OT_LoadRecipe(Operator):
+    bl_idname = "node.formula_load_recipe"
+    bl_label = "Load Recipe"
+    bl_options = {"REGISTER", "UNDO"}
+
+    key: StringProperty()
+
+    @classmethod
+    def description(cls, context, props):
+        r = recipes.BY_KEY.get(props.key)
+        return r.description if r else ""
+
+    def execute(self, context):
+        r = recipes.BY_KEY.get(self.key)
+        if r is None:
+            return {"CANCELLED"}
+        s = settings(context)
+        set_script_text(s, r.script)
+        extra = f" — needs {', '.join(r.needs)}" if r.needs else ""
+        set_status(s, "INFO", f"Loaded recipe: {r.title}{extra}")
+        return {"FINISHED"}
+
+
+class FORMULA_OT_ConvertToScript(_GeoEditorOp, Operator):
+    bl_idname = "node.formula_convert_to_script"
+    bl_label = "Convert Nodes to Script"
+    bl_description = ("Turn the selected node group (or the tree being edited) into a script, "
+                      "like turning a VOP network into a wrangle")
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        space = geo_space(context)
+        tree = space.edit_tree if space else None
+        node = tree.nodes.active if tree else None
+        if node is not None and node.bl_idname == "GeometryNodeGroup" and node.node_tree is not None:
+            tree = node.node_tree
+        if tree is None:
+            self.report({"ERROR"}, "Open a Geometry Nodes tree first")
+            return {"CANCELLED"}
+        try:
+            script, notes = decompile.decompile(decompile.extract(tree))
+        except Exception as e:
+            self.report({"ERROR"}, f"Couldn't convert '{tree.name}': {e}")
+            return {"CANCELLED"}
+        s = settings(context)
+        set_script_text(s, script)
+        for n in notes[:5]:
+            self.report({"WARNING"}, n)
+        msg = f"Converted '{tree.name}'" + (f" — {len(notes)} note(s), see the Info log" if notes else "")
+        set_status(s, "WARNING" if notes else "INFO", msg)
         return {"FINISHED"}
 
 
@@ -472,7 +536,7 @@ class FORMULA_OT_AIGenerate(_GeoEditorOp, Operator):
             ok, err, _ = compiler.check(current)
             current_error = None if ok else str(err)
 
-        _job = ai.Job(cfg, s.ai_prompt, current, current_error)
+        _job = ai.Job(cfg, s.ai_prompt, current, current_error, **compile_options())
         _job.start()
         s.ai_log = ""
         set_status(s, "INFO", _job.status)
@@ -589,6 +653,19 @@ class FORMULA_MT_Examples(Menu):
             self.layout.operator("node.formula_load_example", text=title).key = key
 
 
+class FORMULA_MT_Recipes(Menu):
+    bl_idname = "FORMULA_MT_recipes"
+    bl_label = "Recipes"
+
+    def draw(self, context):
+        flow = self.layout.column_flow(columns=3)
+        for cat, items in recipes.by_category().items():
+            col = flow.column()
+            col.label(text=cat)
+            for r in items:
+                col.operator("node.formula_load_recipe", text=r.title).key = r.key
+
+
 class _PanelBase:
     bl_space_type = "NODE_EDITOR"
     bl_region_type = "UI"
@@ -643,6 +720,7 @@ class FORMULA_PT_Script(_PanelBase, Panel):
     bl_parent_id = "FORMULA_PT_panel"
 
     def draw_header_preset(self, context):
+        self.layout.menu("FORMULA_MT_recipes", text="Recipes", icon="ASSET_MANAGER")
         self.layout.menu("FORMULA_MT_examples", text="Examples", icon="PRESET")
 
     def draw(self, context):
@@ -669,6 +747,7 @@ class FORMULA_PT_Script(_PanelBase, Panel):
         row.scale_y = 1.3
         row.operator("node.formula_check", text="", icon="VIEWZOOM").target = "SCRIPT"
         row.operator("node.formula_generate_script", icon="NODETREE")
+        layout.operator("node.formula_convert_to_script", icon="TEXT")
 
 
 class FORMULA_PT_AI(_PanelBase, Panel):
@@ -919,6 +998,8 @@ classes = (
     FORMULA_OT_Check,
     FORMULA_OT_LoadActive,
     FORMULA_OT_LoadExample,
+    FORMULA_OT_LoadRecipe,
+    FORMULA_OT_ConvertToScript,
     FORMULA_OT_ScriptAddLine,
     FORMULA_OT_ScriptRemoveLine,
     FORMULA_OT_ScriptPaste,
@@ -929,6 +1010,7 @@ classes = (
     FORMULA_OT_AICopyPrompt,
     FORMULA_OT_OpenPrefs,
     FORMULA_MT_Examples,
+    FORMULA_MT_Recipes,
     FORMULA_PT_Panel,
     FORMULA_PT_Script,
     FORMULA_PT_AI,

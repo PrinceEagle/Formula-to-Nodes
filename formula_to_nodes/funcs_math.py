@@ -401,6 +401,9 @@ class MathFuncs:
         return self.math("DIVIDE", self.math("FLOOR", self.math("MULTIPLY", x, count)), count)
 
     def f_vector(self, node, name):
+        if len(node.args) == 1 and name == "vector":
+            # VEX's signature cast: vector(rand(x)) picks the vector form of rand(), noise(), ...
+            return self.coerce(self.expr_hint(node.args[0], VECTOR), VECTOR, f"{name}()'s argument")
         vals = self.args(node, name, {1, 3, 4})
         if len(vals) == 1:
             return self.coerce(vals[0], VECTOR, f"{name}()'s argument")

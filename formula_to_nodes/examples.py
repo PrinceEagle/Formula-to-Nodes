@@ -70,9 +70,47 @@ EXAMPLES = [
     ("side", "Left / right mask",
      "Ternary expression",
      'f@side = @P.x > 0 ? 1 : -1;'),
+
+    ("prim_colors", "Random colour per face",
+     "#runover prim: lines run once per face",
+     '#runover prim\n'
+     '@Cd = hsvtorgb(set(rand(@primnum + chi("seed", 0)), 0.6, 0.9));'),
+
+    ("cull", "Delete points above a height",
+     "removepoint() is applied when the script ends",
+     'if (@P.z > chf("height", 0.5)) removepoint(0, @ptnum);'),
+
+    ("scatter", "Scatter and instance",
+     "Scatter points, randomize them, copy an object onto them",
+     'scatter(chf("density", 20), chi("seed", 0));\n'
+     '@pscale = fit01(rand(@id), chf("Scale/min", 0.5), chf("Scale/max", 1.0));\n'
+     'p@orient = qmultiply(p@orient, quaternion(rand(@id + 1) * 2 * pi, {0, 0, 1}));\n'
+     'instance(chobj("Instance"));'),
+
+    ("function", "Functions and loops",
+     "A user function inside a for loop: three soft rings",
+     'float ring(float d; float r; float w) {\n'
+     '    return 1 - smoothstep(0, w, abs(d - r));\n'
+     '}\n'
+     'float d = length(v@P * {1, 1, 0});\n'
+     'float sum = 0;\n'
+     'for (int i = 1; i <= 3; i++) {\n'
+     '    sum += ring(d, i * chf("spacing", 0.3), chf("width", 0.05));\n'
+     '}\n'
+     'f@rings = sum;'),
+
+    ("detail", "Detail attribute",
+     "One value for the whole geometry, then used per point",
+     'setdetailattrib(0, "maxz", @P.z, "max");\n'
+     'f@from_top = detail(0, "maxz") - @P.z;'),
+
+    ("ramp", "Shaped by a curve",
+     "chramp(): a curve you edit in the sidebar",
+     'float t = relbbox(0, v@P).z;\n'
+     '@P += v@N * chramp("bulge", t, "bell") * chf("amount", 0.3);'),
 ]
 
-AI_FEW_SHOT = ("noise_disp", "flatten", "rest", "grow")
+AI_FEW_SHOT = ("noise_disp", "flatten", "rest", "grow", "prim_colors", "scatter", "function", "detail")
 
 
 def get(key):

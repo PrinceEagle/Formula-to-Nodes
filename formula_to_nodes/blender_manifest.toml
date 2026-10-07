@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "formula_to_nodes"
-version = "2.1.0"
+version = "3.0.0"
 name = "Formula to Nodes"
 tagline = "Type VEX-style formulas or describe an effect, get node groups"
 maintainer = "Formula to Nodes <contact@princeeagle.com>"

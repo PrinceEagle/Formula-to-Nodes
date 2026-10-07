@@ -24,7 +24,7 @@ reg("dihedral", "dihedral(a, b)", "rotation that turns direction a into directio
     "f_dihedral")
 reg("lookat", "lookat(from, to [, up])", "rotation whose -Z axis looks from → to (Y toward up)",
     "Rotation & matrix", "f_lookat")
-reg("alignaxis", 'alignaxis(dir [, up, "z"])', "rotation whose given axis points along dir (instancing)",
+reg("alignaxis", 'alignaxis(dir [, up] [, "z"])', "rotation whose given axis points along dir (instancing)",
     "Rotation & matrix", "f_alignaxis")
 reg("qangle", "qangle(q)", "rotation angle in radians", "Rotation & matrix", "f_qaxisangle", out="Angle")
 reg("qaxis", "qaxis(q)", "rotation axis", "Rotation & matrix", "f_qaxisangle", out="Axis")
@@ -237,12 +237,13 @@ class XformFuncs:
         d = self.coerce(self.expr(node.args[0]), VECTOR, "alignaxis()'s direction")
         axis = "Z"
         up = None
-        if len(node.args) >= 2:
-            up = self.coerce(self.expr(node.args[1]), VECTOR, "alignaxis()'s up")
-        if len(node.args) == 3:
-            axis = self.str_const(node.args[2], "alignaxis()'s axis").strip().upper()
+        rest = list(node.args[1:])
+        if rest and isinstance(rest[-1], ast.Constant) and isinstance(rest[-1].value, str):
+            axis = self.str_const(rest.pop(), "alignaxis()'s axis").strip().upper()
             if axis not in ("X", "Y", "Z"):
                 raise FormulaError('alignaxis(): the axis is "x", "y" or "z"')
+        if rest:
+            up = self.coerce(self.expr(rest[0]), VECTOR, "alignaxis()'s up")
         if up is None:
             n = self.g.add("FunctionNodeAlignRotationToVector", {"axis": axis, "pivot_axis": "AUTO"},
                            {"Factor": 1.0, "Vector": self.inp(d, VECTOR)})

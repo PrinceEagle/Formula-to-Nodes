@@ -145,6 +145,9 @@ BUILTIN_ATTRS = {
     "area":           ("GeometryNodeInputMeshFaceArea", "Area", FLOAT, None),
     "island":         ("GeometryNodeInputMeshIsland", "Island Index", INT, None),
     "numislands":     ("GeometryNodeInputMeshIsland", "Island Count", INT, None),
+    "edgeangle":      ("GeometryNodeInputMeshEdgeAngle", "Unsigned Angle", FLOAT, None),
+    "signededgeangle": ("GeometryNodeInputMeshEdgeAngle", "Signed Angle", FLOAT, None),
+    "shadesmooth":    ("GeometryNodeInputShadeSmooth", "Smooth", BOOL, None),
     "frame":          ("GeometryNodeInputSceneTime", "Frame", FLOAT, None),
     "time":           ("GeometryNodeInputSceneTime", "Seconds", FLOAT, None),
 }
@@ -169,6 +172,9 @@ READONLY_HINTS = {
     "area": "face areas are computed from the mesh",
     "island": "islands are computed from the mesh",
     "numislands": "islands are computed from the mesh",
+    "edgeangle": "edge angles are computed from the mesh",
+    "signededgeangle": "edge angles are computed from the mesh",
+    "shadesmooth": "use shadesmooth(1) to change shading",
     "frame": "scene time is read-only",
     "time": "scene time is read-only",
 }
@@ -598,10 +604,6 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
     def _check_new_name(self, name):
         if name in CONSTANTS or name in RESERVED:
             raise FormulaError(f"'{name}' is a built-in name and can't be used as a variable")
-        if name in FUNCS:
-            raise FormulaError(f"'{name}' is a function name — pick another variable name")
-        if name in self.functions:
-            raise FormulaError(f"'{name}' is one of your functions — pick another variable name")
         if name in TYPE_NAMES:
             raise FormulaError(f"'{name}' is a type name")
         if name.startswith("__"):
@@ -1644,7 +1646,8 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
             if prefix and PREFIX_TYPE.get(prefix) != t:
                 raise FormulaError(f"'{prefix}@{raw}' on instances is a {type_word(t)}")
             return Attr(name, t, "inst_xform")
-        if dom == "DETAIL" and name not in BUILTIN_ATTRS:
+        if dom == "DETAIL" and (name not in BUILTIN_ATTRS or (write and prefix and BUILTIN_ATTRS[name][3] is None)):
+            # detail mode: f@area = sumof(@area) stores a detail attribute called "area"
             t = self._attr_type(prefix, name, raw, detail=True)
             return Attr(name, t, "detail", field=False)
         if (name in self.detail_attrs and not write and name not in self.attr_info
