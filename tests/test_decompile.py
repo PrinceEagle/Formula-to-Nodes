@@ -33,8 +33,9 @@ EXTRA = [
 
 def _cases():
     out = [(f"example:{e[0]}", e[3]) for e in examples.EXAMPLES]
+    # the research-paper solvers are left out: each one is a long simulation, too slow to evaluate twice here
     out += [(f"recipe:{r.key}", r.script) for r in recipes.RECIPES
-            if not r.test.get("inputs") and not r.test.get("prelude")]
+            if not r.test.get("inputs") and not r.test.get("prelude") and r.category != "Research Papers"]
     return out + [(f"extra:{k}", s) for k, s in EXTRA]
 
 

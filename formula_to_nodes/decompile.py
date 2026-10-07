@@ -935,6 +935,14 @@ class Decompiler:
             return self.call(fn, v, (f'"{_DOMAIN_WORD.get(dom, "point")}"', "string", ATOM), t=v[1])
         return self.call(fn, v, t=v[1])
 
+    def x_GeometryNodeAttributeDomainSize(self, node, sock):
+        g = self._geometry_ref(node, "Geometry")
+        fn = {"Point Count": "npoints", "Edge Count": "nedges", "Face Count": "nprimitives",
+              "Face Corner Count": "nvertices", "Spline Count": "ncurves"}.get(sock)
+        if fn is None:
+            raise _Unsupported(f"domain size output '{sock}'")
+        return f"{fn}({g})", "int", ATOM
+
     def x_GeometryNodeBoundBox(self, node, sock):
         g = self._geometry_ref(node, "Geometry")
         fn = {"Min": "getbbox_min", "Max": "getbbox_max"}.get(sock)

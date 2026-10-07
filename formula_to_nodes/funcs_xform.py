@@ -229,7 +229,11 @@ class XformFuncs:
         n = self.g.add("FunctionNodeAxesToRotation", {"primary_axis": "Z", "secondary_axis": "Y"},
                        {"Primary Axis": self.inp(self.vmath("SUBTRACT", frm, to), VECTOR),
                         "Secondary Axis": self.inp(up, VECTOR)})
-        return Val(ROTATION, o=n.out("Rotation"), field=frm.field or to.field or up.field)
+        rot = Val(ROTATION, o=n.out("Rotation"), field=frm.field or to.field or up.field)
+        if self.hinted(node) == MATRIX:      # matrix3 m = lookat(...) as in Houdini
+            m = self.g.add("FunctionNodeCombineTransform", {}, {"Rotation": rot.o})
+            return Val(MATRIX, o=m.out("Transform"), field=rot.field)
+        return rot
 
     def f_alignaxis(self, node, name):
         if len(node.args) not in (1, 2, 3):

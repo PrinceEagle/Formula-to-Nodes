@@ -128,6 +128,9 @@ VEX_ALIASES = {"P": "position", "N": "normal", "pscale": "radius", "v": "velocit
 
 ALIAS_TYPES = {"P": VECTOR, "N": VECTOR, "v": VECTOR, "pscale": FLOAT, "Cd": VECTOR, "rest": VECTOR,
                "Frame": FLOAT, "Time": FLOAT, "material": INT, "matindex": INT}
+# Houdini globals: @curveu is the curve parameter, @SimTime/@SimFrame the scene time, @TimeInc the time step
+VEX_ALIASES.update({"curveu": "curveparam", "SimTime": "time", "SimFrame": "frame", "TimeInc": "timeinc"})
+ALIAS_TYPES.update({"curveu": FLOAT, "SimTime": FLOAT, "SimFrame": FLOAT, "TimeInc": FLOAT})
 
 # name → (node idname, output socket, type, write kind)
 BUILTIN_ATTRS = {
@@ -189,7 +192,7 @@ RESERVED = {
     "iteration": ("repeat", "a repeat(n) { } block"),
 }
 
-TYPE_NAMES = {"float", "int", "vector", "vector3", "vector4", "bool", "string", "matrix",
+TYPE_NAMES = {"float", "int", "vector", "vector2", "vector3", "vector4", "bool", "string", "matrix",
               "matrix3", "matrix4", "void"}
 
 UNSUPPORTED = {
@@ -652,7 +655,7 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
         prefix, raw = info
         attr = self.resolve_attr(prefix, raw, write=True)
         label = raw if raw == attr.name else f"{raw} ({attr.name})"
-        if attr.kind in ("readonly", "const", "count", "index_of", "opinput"):
+        if attr.kind in ("readonly", "const", "count", "index_of", "opinput", "timeinc"):
             hint = READONLY_HINTS.get(attr.name, "it's read-only")
             if attr.kind == "index_of":
                 hint = "the element index is implicit — store a copy instead, e.g. i@my_index = @ptnum"
@@ -662,6 +665,8 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
                 hint = "other inputs are read-only"
             elif attr.kind == "const":
                 hint = "'up' is the constant {0, 0, 1}"
+            elif attr.kind == "timeinc":
+                hint = "it's the time step of the frame or simulation"
             raise FormulaError(f"can't write to '{label}' — {hint}")
 
         if attr.kind == "detail":
@@ -1632,6 +1637,8 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
             a = Attr(inner.name, inner.t, "opinput")
             a.input, a.inner = int(m.group(1)), inner
             return a
+        if raw.startswith("group_") and len(raw) > 6:
+            return self.resolve_attr("b", raw[6:], write)     # Houdini groups → boolean attributes
         dom = self.domain
         if raw in INDEX_ALIASES:
             return Attr(INDEX_ALIASES[raw], INT, "index_of")
@@ -1640,6 +1647,8 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
         name = VEX_ALIASES.get(raw, raw)
         if prefix and name != raw and raw in ALIAS_TYPES and PREFIX_TYPE.get(prefix) != ALIAS_TYPES[raw]:
             name = raw          # f@v is a float called "v", not the velocity vector
+        if name == "timeinc":
+            return Attr("timeinc", FLOAT, "timeinc", field=False)
         if dom == "INSTANCE" and name in ("orient", "rotation", "scale", "transform", "radius"):
             t = {"orient": ROTATION, "rotation": ROTATION, "scale": VECTOR,
                  "transform": MATRIX, "radius": FLOAT}[name]
@@ -1691,7 +1700,18 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
         self.note(f"'@{raw}' has no type prefix, so it's a vector attribute — write f@{raw} for a float")
         return VECTOR
 
+    def read_timeinc(self):
+        """@TimeInc: the simulation step inside simulate { }, else one frame in seconds."""
+        try:
+            return self.expr(ast.Name(id="deltatime", ctx=ast.Load()))
+        except FormulaError:
+            st = self.g.add("GeometryNodeInputSceneTime")
+            return self.math("DIVIDE", Val(FLOAT, o=st.out("Seconds")),
+                             self.math("MAXIMUM", Val(FLOAT, o=st.out("Frame")), Val(FLOAT, c=1.0)))
+
     def read_attr(self, a):
+        if a.kind == "timeinc":
+            return self.read_timeinc()
         if a.kind == "const":
             return Val(VECTOR, c=(0.0, 0.0, 1.0))
         if a.kind == "count":

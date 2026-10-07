@@ -45,10 +45,14 @@ class TestParser(unittest.TestCase):
         kinds = [type(s).__name__ for s in prog.stmts]
         self.assertEqual(kinds, ["SFor", "SForeachArr", "SFor"])
 
-    def test_while_is_rejected_with_a_hint(self):
+    def test_while_becomes_a_bounded_repeat(self):
+        prog = lang.parse_source("while (x > 0) { x -= 1; }")
+        self.assertEqual(prog.stmts[0].kind, "repeat")
+
+    def test_do_while_is_rejected_with_a_hint(self):
         with self.assertRaises(FormulaError) as cm:
-            lang.parse_source("while (x > 0) { x -= 1; }")
-        self.assertIn("for (", str(cm.exception))
+            lang.parse_source("do { x -= 1; } while (x > 0);")
+        self.assertIn("while (condition)", str(cm.exception))
 
     def test_declarations(self):
         prog = lang.parse_source("float a = 1, b = max(2, 3);\nint ids[] = {1, 2};\nvector4 q = {0, 0, 0, 1};\n"

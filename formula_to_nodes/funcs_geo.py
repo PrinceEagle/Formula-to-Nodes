@@ -25,6 +25,14 @@ reg("nvertices", "nvertices(geo)", "number of face corners", "Geometry", "f_coun
 reg("nedges", "nedges(geo)", "number of edges", "Geometry", "f_count", domain="EDGE")
 reg("ncurves", "ncurves(geo)", "number of curves", "Geometry", "f_count", domain="CURVE")
 reg("relbbox", "relbbox(geo, pos)", "position inside the bounding box, 0..1 per axis", "Geometry", "f_bbox", which="rel")
+reg("getbbox", "getbbox(geo, min, max)", "bounding box corners into two vector variables (Houdini style)",
+    "Geometry", "f_getbbox_out", effect=True)
+for _n, _t, _sig in [("inpointgroup", "point", 'inpointgroup(geo, "group", ptnum)'),
+                     ("inprimgroup", "prim", 'inprimgroup(geo, "group", primnum)'),
+                     ("setpointgroup", "setpointattrib", 'setpointgroup(geo, "group", ptnum, value)'),
+                     ("setprimgroup", "setprimattrib", 'setprimgroup(geo, "group", primnum, value)')]:
+    reg(_n, _sig, "Houdini groups, stored as a boolean attribute named after the group (@group_name works too)",
+        "Geometry", "f_group", target=_t, effect=_t.startswith("set"))
 reg("getbbox_min", "getbbox_min(geo)", "bounding box minimum", "Geometry", "f_bbox", which="min")
 reg("getbbox_max", "getbbox_max(geo)", "bounding box maximum", "Geometry", "f_bbox", which="max")
 reg("getbbox_center", "getbbox_center(geo)", "bounding box center", "Geometry", "f_bbox", which="center")
@@ -337,6 +345,31 @@ class GeoFuncs:
         if node.args:
             geo, _ = self.geo_arg(node.args[0], name)
         return self.count_elements(domain, geo)
+
+    def f_getbbox_out(self, node, name):
+        from .core import VOID
+        if len(node.args) != 3:
+            raise FormulaError("getbbox() takes getbbox(0, min, max) — or use getbbox_min(0) and getbbox_max(0)")
+        geo, _ = self.geo_arg(node.args[0], name)
+        bb = self.g.add("GeometryNodeBoundBox", {}, {"Geometry": geo})
+        self.assign_out(node.args[1], Val(VECTOR, o=bb.out("Min")), name)
+        self.assign_out(node.args[2], Val(VECTOR, o=bb.out("Max")), name)
+        return Val(VOID)
+
+    def f_group(self, node, name):
+        """Groups are boolean attributes: inpointgroup(0, "top", i) is point(0, "b@top", i)."""
+        d = FUNCS[name].data
+        want = 4 if d["target"].startswith("set") else 3
+        if len(node.args) != want:
+            raise FormulaError(f"{name}() takes {FUNCS[name].sig}")
+        group = self.str_const(node.args[1], f"{name}()'s group name").strip()
+        if not re.fullmatch(r"[A-Za-z_]\w*", group):
+            raise FormulaError(f'{name}(): group names are plain names, like "top"')
+        args = list(node.args)
+        args[1] = ast.copy_location(ast.Constant(value="b@" + group), node.args[1])
+        call = ast.copy_location(ast.Call(func=ast.Name(id=d["target"], ctx=ast.Load()), args=args, keywords=[]), node)
+        self._stmt_call = self._call_is_stmt
+        return self.e_Call(call)
 
     def f_bbox(self, node, name):
         which = FUNCS[name].data["which"]

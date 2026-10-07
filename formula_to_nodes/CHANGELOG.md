@@ -17,7 +17,7 @@ A much bigger language, closer to Houdini VEX, plus recipes and nodes → script
 - **Geometry operations**: scatter, instance, realize, subdivide, subdivsurf, triangulate, dualmesh,
   convexhull, fuse, extrude, bevel, resample, sweep, tocurves, topoints, points, grid, join, transform,
   setmaterial, shadesmooth, flipfaces, sortpoints, removepoint/removeprim, addpoint.
-- **185 new function names** (99 → 284): lookups (`point`, `prim`, `nearpoint`, `xyzdist`, `primuv`, `intersect`,
+- **195 new function names** (99 → 294): lookups (`point`, `prim`, `nearpoint`, `xyzdist`, `primuv`, `intersect`,
   ray casts, `volumesample`, `texture`), topology (`neighbour`, `primpoint`, ...), aggregates
   (`sumof`, `avgof`, `minof`, ... with an optional group or domain), rotations and matrices
   (`quaternion`, `slerp`, `dihedral`, `lookat`, `maketransform`, ...), colour, text (`sprintf`,
@@ -26,8 +26,15 @@ A much bigger language, closer to Houdini VEX, plus recipes and nodes → script
 - **Parameters** get panels (`chf("Folder/name")`), ranges and tooltips (`min=`, `max=`, `tip=`).
 
 ## Recipes
-51 ready-made scripts in 9 categories (masks, deformers, scatter & instance, growth & simulation,
-effectors, colour, curves, modeling, utility): Script panel › **Recipes**, or `formula_list_recipes` over MCP.
+56 ready-made scripts in 10 categories (masks, deformers, scatter & instance, growth & simulation,
+effectors, colour, curves, modeling, utility, research papers): Script panel › **Recipes**, or `formula_list_recipes` over MCP.
+
+## Research papers as recipes
+Classic papers rebuilt as short scripts: a Stable Fluids smoke solver (Stam 1999, Fedkiw et al. 2001), Tessendorf ocean waves (2001), a Lattice Boltzmann vortex street (1992), the Lorenz attractor (1963) and a sphere-traced Mandelbulb (Hart 1996). Each compiles to an ordinary node group.
+
+## Houdini habits
+`while` loops, groups (`inpointgroup()`, `setpointgroup()`, `@group_name`), `@TimeInc`, `@curveu`, `vector2`, the `sample_*()` family, `getbbox(geo, min, max)` and `matrix3 m = lookat(...)` now work as in VEX. `while` runs as a bounded loop: 128 passes, or
+`#pragma maxiter N`. Groups are stored as boolean attributes. Reserved words such as `lambda` get a clear error.
 
 ## Nodes → script
 **Convert Nodes to Script** turns any Geometry Nodes group into a script (like VOPs → wrangle).

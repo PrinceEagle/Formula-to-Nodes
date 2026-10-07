@@ -45,10 +45,10 @@ class FormulaError(Exception):
 #  Types shared with the compiler
 # ─────────────────────────────────────────────────────────────────────────────
 
-TYPE_WORDS = {"float": "FLOAT", "vector": "VECTOR", "vector3": "VECTOR", "vector4": "ROTATION",
+TYPE_WORDS = {"float": "FLOAT", "vector": "VECTOR", "vector2": "VECTOR", "vector3": "VECTOR", "vector4": "ROTATION",
               "int": "INT", "bool": "BOOL", "string": "STRING",
               "matrix": "MATRIX", "matrix4": "MATRIX", "matrix3": "MATRIX", "void": "VOID"}
-_TYPES_RE = r"float|vector4|vector3|vector|int|bool|string|matrix4|matrix3|matrix"
+_TYPES_RE = r"float|vector4|vector3|vector2|vector|int|bool|string|matrix4|matrix3|matrix"
 
 
 def list_type(t):
@@ -232,7 +232,7 @@ _CONTINUE_START = set("+-*/%^?:&|<>=.")
 
 _DIRECTIVE_RE = re.compile(r"#(include|runover|define|pragma)\b")
 _FUNC_RE = re.compile(
-    r"(?:function\s+)?(?:export\s+)?(?P<rtype>float|vector4|vector3|vector|int|bool|string|"
+    r"(?:function\s+)?(?:export\s+)?(?P<rtype>float|vector4|vector3|vector2|vector|int|bool|string|"
     r"matrix4|matrix3|matrix|void)\s*(?P<arr>\[\s*\])?\s+(?P<name>[A-Za-z_]\w*)\s*\((?P<params>.*)\)",
     re.S)
 
@@ -598,6 +598,12 @@ def preprocess(text):
     return _restore_strings(code.strip(), saved)
 
 
+# Python words the expression parser can't take as variable names
+_RESERVED_NAMES = {"lambda", "pass", "def", "class", "from", "import", "global", "with", "yield", "assert", "del",
+                   "async", "await", "nonlocal", "raise", "try", "except", "finally", "in", "is", "None", "elif",
+                   "as"}
+
+
 def parse_expr(text, line=None):
     """Parse one expression (VEX-flavoured) into a Python AST node."""
     if text is None or not text.strip():
@@ -610,8 +616,12 @@ def parse_expr(text, line=None):
         tree = ast.parse(py, mode="eval")
     except SyntaxError:
         hint = ""
-        if re.search(r"\b(while|do)\b", text):
-            hint = " — while/do loops aren't supported; use for (int i = 0; i < n; i++) { } or repeat(n) { }"
+        kw = next((w for w in re.findall(r"\b[A-Za-z_]\w*\b", re.sub(r'"[^"]*"', "", text))
+                   if w in _RESERVED_NAMES), None)
+        if kw:
+            hint = f" — '{kw}' is a reserved word, rename it (for example {kw}_)"
+        elif re.search(r"\b(while|do)\b", text):
+            hint = " — while (condition) { } is a statement of its own; do { } while isn't supported"
         elif re.search(r"\b(break|continue)\b", text):
             hint = " — break/continue aren't supported; guard the rest of the loop with if (...)"
         elif "{" in text:
@@ -822,8 +832,8 @@ class _Parser:
                 hk, payload = _classify_header(self._expand(text)) or _classify_header(text)
                 if hk in ("else", "elseif"):
                     raise self._err("'else' without a matching 'if'", line)
-                if hk in ("while", "do"):
-                    raise self._err("while/do loops aren't supported — use for (int i = 0; i < n; i++) { } "
+                if hk == "do":
+                    raise self._err("do { } while loops aren't supported — use while (condition) { } "
                                     "or repeat(n) { }", line)
                 if hk == "func":
                     if not top:
@@ -874,8 +884,13 @@ class _Parser:
             if kp is not None and kp[1]:
                 inner, _ = self._block([("stmt", kp[1], line)], 0, closing=False, open_line=line)
                 return [self._make_block("repeat", kp[0], inner, line, f"repeat ({kp[0]})")], i + 1
-        if re.match(r"(while|do)\b", text):
-            raise self._err("while/do loops aren't supported — use for (int i = 0; i < n; i++) { } "
+        if re.match(r"while\s*\(", text):
+            kp = _keyword_paren(text, "while")
+            if kp is not None and kp[1]:
+                inner, _ = self._block([("stmt", kp[1], line)], 0, closing=False, open_line=line)
+                return [self._make_block("while", kp[0], inner, line, f"while ({kp[0]})")], i + 1
+        if re.match(r"do\b", text):
+            raise self._err("do { } while loops aren't supported — use while (condition) { } "
                             "or repeat(n) { }", line)
         if re.match(r"else\b", text):
             raise self._err("'else' without a matching 'if'", line)
@@ -940,6 +955,18 @@ class _Parser:
                 raise FormulaError(f"unknown run-over domain '{payload}' — use point, vertex, prim, edge, "
                                    f"curve, instance or detail", line)
             return SBlock(line, "runover", RUNOVER_DOMAINS[word], body, text=text)
+        if kind == "while":
+            # while (c) { body } runs as repeat(limit) { if (c) { body } }: once c is false nothing
+            # changes, so it stays false. The limit is 128, or #pragma maxiter N.
+            if not payload.strip():
+                raise FormulaError("while needs a condition, e.g. while (d > 0.01) { ... }", line)
+            limit = 128
+            for p in self.prog.pragmas:
+                m = re.match(r"maxiter\s+(\d+)", p.strip())
+                if m:
+                    limit = int(m.group(1))
+            guard = SBlock(line, "if", parse_expr(payload, line), body, text=text)
+            return SBlock(line, "repeat", parse_expr(str(limit), line), [guard], text=text)
         if kind == "repeat":
             if not payload.strip():
                 raise FormulaError("repeat needs a count, e.g. repeat(5) { ... }", line)

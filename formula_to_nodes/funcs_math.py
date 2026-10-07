@@ -190,6 +190,12 @@ reg("set vec vector", "NAME(x, y, z) or NAME(x)", "builds a vector (4 values bui
 reg("float", "float(x)", "to float", "Conversion", "f_cast", t=FLOAT)
 reg("int", "int(x)", "to int (truncates)", "Conversion", "f_cast", t=INT)
 reg("bool", "bool(x)", "to bool (non-zero is true)", "Conversion", "f_cast", t=BOOL)
+for _n, _k, _d in [("sample_direction_uniform", "direction", "uniformly distributed unit vector from u = (0..1, 0..1)"),
+                   ("sample_sphere_uniform", "sphere", "uniform point inside the unit sphere from u = (0..1, 0..1, 0..1)"),
+                   ("sample_hemisphere", "hemisphere", "uniform direction on the +Z hemisphere from u = (0..1, 0..1)"),
+                   ("sample_disk_uniform", "disk", "uniform point on the unit disk (XY) from u = (0..1, 0..1)"),
+                   ("sample_circle_uniform", "circle", "point on the unit circle (XY) from u (0..1)")]:
+    reg(_n, f"{_n}(u)", _d, "Noise & random", "f_sample", kind=_k)
 reg("getcomp", "getcomp(v, i)", "component i (0, 1, 2) of a vector; i may vary per element", "Conversion", "f_getcomp")
 
 
@@ -404,9 +410,11 @@ class MathFuncs:
         if len(node.args) == 1 and name == "vector":
             # VEX's signature cast: vector(rand(x)) picks the vector form of rand(), noise(), ...
             return self.coerce(self.expr_hint(node.args[0], VECTOR), VECTOR, f"{name}()'s argument")
-        vals = self.args(node, name, {1, 3, 4})
+        vals = self.args(node, name, {1, 2, 3, 4})
         if len(vals) == 1:
             return self.coerce(vals[0], VECTOR, f"{name}()'s argument")
+        if len(vals) == 2:           # Houdini's vector2: set(x, y)
+            return self.combine(vals + [Val(FLOAT, c=0.0)])
         if len(vals) == 4:
             return self.quat_literal(vals)
         return self.combine(vals)
@@ -422,6 +430,29 @@ class MathFuncs:
         if t == INT and v.t == FLOAT:
             return self.coerce(self.math("TRUNC", v), INT)
         return self.coerce(v, t, f"{name}()'s argument")
+
+    def f_sample(self, node, name):
+        """Houdini's sample_*() family: maps uniform random numbers to directions and points."""
+        (u,) = self.args(node, name, {1})
+        kind = FUNCS[name].data["kind"]
+        if u.t in (FLOAT, INT, BOOL):
+            u = self.combine([self.coerce(u, FLOAT), Val(FLOAT, c=0.0), Val(FLOAT, c=0.0)])
+        u = self.coerce(u, VECTOR, f"{name}()'s argument")
+        ux, uy, uz = (self.sep(u, i) for i in range(3))
+        one, zero, tau = Val(FLOAT, c=1.0), Val(FLOAT, c=0.0), Val(FLOAT, c=2 * math.pi)
+        if kind in ("circle", "disk"):
+            phi = self.math("MULTIPLY", ux, tau)
+            rad = one if kind == "circle" else self.math("SQRT", uy)
+            return self.combine([self.math("MULTIPLY", rad, self.math("COSINE", phi)),
+                                 self.math("MULTIPLY", rad, self.math("SINE", phi)), zero])
+        z = ux if kind == "hemisphere" else self.math("SUBTRACT", one, self.math("MULTIPLY", ux, Val(FLOAT, c=2.0)))
+        r = self.math("SQRT", self.math("MAXIMUM", self.math("SUBTRACT", one, self.math("MULTIPLY", z, z)), zero))
+        phi = self.math("MULTIPLY", uy, tau)
+        d = self.combine([self.math("MULTIPLY", r, self.math("COSINE", phi)),
+                          self.math("MULTIPLY", r, self.math("SINE", phi)), z])
+        if kind == "sphere":
+            return self.vmath("SCALE", d, scale=self.math("POWER", uz, Val(FLOAT, c=1.0 / 3.0)))
+        return d
 
     def f_getcomp(self, node, name):
         if len(node.args) != 2:
