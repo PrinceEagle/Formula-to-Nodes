@@ -46,6 +46,7 @@ from .funcs_text import TextFuncs
 from .funcs_lists import ListFuncs
 from .funcs_params import ParamFuncs
 from .geo_ops import GeoOps
+from .funcs_volume import VolumeOps
 
 __all__ = ["compile_source", "check", "CompileResult", "Compiler", "FUNCS", "CATEGORY_ORDER",
            "reference_by_category", "Out", "Node", "Graph", "IfaceSocket", "Val",
@@ -55,9 +56,12 @@ _RANK = {BOOL: 0, INT: 1, FLOAT: 2, VECTOR: 3}
 MATH_IN = ("Value", "Value_001", "Value_002")
 VM_IN = ("Vector", "Vector_001", "Vector_002")
 UNROLL_MAX = 8
-DOMAINS = ("POINT", "EDGE", "FACE", "CORNER", "CURVE", "INSTANCE", "LAYER", "DETAIL")
+DOMAINS = ("POINT", "EDGE", "FACE", "CORNER", "CURVE", "INSTANCE", "LAYER", "DETAIL", "VOXEL")
 DOMAIN_WORD = {"POINT": "point", "EDGE": "edge", "FACE": "prim (face)", "CORNER": "vertex (face corner)",
-               "CURVE": "curve", "INSTANCE": "instance", "LAYER": "layer", "DETAIL": "detail"}
+               "CURVE": "curve", "INSTANCE": "instance", "LAYER": "layer", "DETAIL": "detail",
+               "VOXEL": "voxel"}
+# function categories that need geometry elements, so they can't run per voxel
+VOXEL_DENIED_CATEGORIES = ("Topology", "Aggregates", "Effects", "Geometry operations", "Volumes")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -66,13 +70,14 @@ DOMAIN_WORD = {"POINT": "point", "EDGE": "edge", "FACE": "prim (face)", "CORNER"
 
 class Ctx:
     """A geometry chain: the root, or the inside of one zone."""
-    __slots__ = ("parent", "kind", "geo", "mark", "reserved", "removals", "additions")
+    __slots__ = ("parent", "kind", "geo", "mark", "reserved", "removals", "additions", "voxels")
 
     def __init__(self, parent, kind, geo, mark, reserved=None):
         self.parent, self.kind, self.geo, self.mark = parent, kind, geo, mark
         self.reserved = reserved or {}
         self.removals = {}        # domain → (captured bool field, delete mode)
         self.additions = []       # geometry to join at the end of this chain
+        self.voxels = {}          # grid name → (type, value, topology): runover(voxel) writes not stored yet
 
 
 class Scope:
@@ -265,7 +270,7 @@ def normalize_runover(word):
 #  Compiler
 # ═════════════════════════════════════════════════════════════════════════════
 
-class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs, ParamFuncs, GeoOps):
+class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs, ParamFuncs, GeoOps, VolumeOps):
     def __init__(self, strict=False, target=None, runover=None, resolver=None):
         self.strict = strict
         self.target = target if isinstance(target, caps.Target) else caps.Target(target)
@@ -303,6 +308,8 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
         self._uid = 0
         self.point_normals = False    # after scatter()/topoints(): @N is the stored "N" attribute
         self.wrote_pscale = False
+        self.vol_space = None         # VolumeSpace from volumebounds(): the voxels runover(voxel) writes
+        self.grid_info = {}           # grid name → type written by this script
 
     # ── entry ──────────────────────────────────────────────────────────────
     def run(self, source, mode, output):
@@ -509,6 +516,9 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
         return None
 
     def stmt(self, s):
+        if self.ctx.voxels and (isinstance(s, (SFor, SForeachArr))
+                                or (isinstance(s, SBlock) and s.kind in ("sim", "repeat", "foreach"))):
+            self.flush_voxels(self.ctx)       # zones carry the geometry: store pending grids first
         if isinstance(s, SDecl):
             self.s_decl(s)
         elif isinstance(s, SAssign):
@@ -706,6 +716,9 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
 
     def _emit_write(self, attr, value=None, offset=None):
         dom = self.domain
+        if attr.kind == "voxel":
+            self.write_voxel(attr, value)
+            return
         if dom == "DETAIL":
             raise FormulaError(f"'@{attr.name}' belongs to the elements, but this runs over detail (once) — "
                                f"write detail attributes like f@total = ..., or use runover(point) {{ }}")
@@ -903,9 +916,15 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
     def s_runover(self, s):
         if s.arg == "DETAIL":
             self.require("geometry_bundles")
+        if s.arg == "VOXEL":
+            self.require("volume_grids")
+            if self.domain == "VOXEL":
+                raise FormulaError("this already runs over voxels")
         self._push("block", domain=s.arg)
         flow = self.stmts(s.body)
         self._pop_merge()
+        if s.arg == "VOXEL":
+            self.flush_voxels(self.ctx)
         return flow
 
     def s_zone(self, s):
@@ -1544,10 +1563,18 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
                                    f"lines after it can't stay conditional; move them after the if")
             raise FormulaError(f"'{b.name}' was computed on the geometry before {self.epoch_reason} — "
                                f"compute it again after that line (or store it in an attribute first)")
+        cur = self.field_domain()
+        if (b.domain == "VOXEL") != (cur == "VOXEL") and b.domain != "DETAIL":
+            if b.domain == "VOXEL":
+                raise FormulaError(f"'{b.name}' is a per-voxel value — it only exists inside runover(voxel) "
+                                   f"{{ }}. Store it in a grid (f@{b.name} = ... inside the block) and read it "
+                                   f"with volumesample(0, \"{b.name}\", @P)")
+            raise FormulaError(f"'{b.name}' is per {DOMAIN_WORD.get(b.domain, 'element').split()[0]} — voxels "
+                               f"can't read it directly. Turn it into a grid with rasterize() first, or "
+                               f"compute it inside runover(voxel) {{ }}")
         cap = self.valid_capture(b)
         if cap is not None:
             return cap
-        cur = self.field_domain()
         if b.domain != cur and b.domain != "DETAIL" and b.mark == self.ctx.mark \
                 and self._ctx_within(self.ctx, b.ctx) and v.t in ITEM_TYPE and v.t != STRING:
             # computed per <b.domain>, used per <cur>: capture where it was computed,
@@ -1574,7 +1601,7 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
         sc = self.scope
         while sc is not None:
             for b in sc.bindings.values():
-                if (b.lazy.field and b not in batch and b.epoch == self.epoch
+                if (b.lazy.field and b not in batch and b.epoch == self.epoch and b.domain != "VOXEL"
                         and self._read_between(b.name, after, self.zone_limit)
                         and self.valid_capture(b) is None):
                     if b.lazy.t not in ITEM_TYPE or is_list(b.lazy.t) or b.lazy.t in RESOURCE_TYPES:
@@ -1633,6 +1660,8 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
             a.input, a.inner = int(m.group(1)), inner
             return a
         dom = self.domain
+        if dom == "VOXEL":
+            return self.resolve_voxel_attr(prefix, raw, write)
         if raw in INDEX_ALIASES:
             return Attr(INDEX_ALIASES[raw], INT, "index_of")
         if raw in COUNT_ALIASES:
@@ -1692,6 +1721,8 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
         return VECTOR
 
     def read_attr(self, a):
+        if a.kind in ("voxel", "voxel_index"):
+            return self.read_voxel_attr(a)
         if a.kind == "const":
             return Val(VECTOR, c=(0.0, 0.0, 1.0))
         if a.kind == "count":
@@ -2009,6 +2040,9 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
             raise FormulaError(f"unknown function '{name}()'{hint}")
         if fd.feature:
             self.require(fd.feature)
+        if self.domain == "VOXEL" and (fd.category in VOXEL_DENIED_CATEGORIES or fd.data.get("no_voxel")):
+            raise FormulaError(f"{name}() works on geometry elements, not voxels — call it outside "
+                               f"runover(voxel) {{ }}")
         if node.keywords and not fd.data.get("keywords"):
             raise FormulaError(f"{name}() doesn't take named arguments")
         stmt_call, self._stmt_call = self._stmt_call, False
@@ -2200,6 +2234,10 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
             if not 0 <= int(idx.c) <= 2:
                 raise FormulaError("vector index must be 0, 1 or 2")
             return self.sep(v, int(idx.c))
+        if self.target.supports("vector_component"):
+            n = self.g.add("FunctionNodeGetVectorComponent", {}, {"Vector": self.inp(v, VECTOR),
+                                                                  "Index": self.inp(idx, INT)})
+            return Val(FLOAT, o=n.out("Value"), field=v.field or idx.field)
         parts = [self.sep(v, i) for i in range(3)]
         return self.index_switch(idx, parts, FLOAT)
 

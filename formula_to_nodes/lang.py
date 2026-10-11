@@ -75,8 +75,9 @@ RUNOVER_DOMAINS = {
     "instance": "INSTANCE", "instances": "INSTANCE",
     "layer": "LAYER", "layers": "LAYER",
     "detail": "DETAIL", "numbers": "DETAIL", "once": "DETAIL",
+    "voxel": "VOXEL", "voxels": "VOXEL",
 }
-FOREACH_DOMAINS = {k: v for k, v in RUNOVER_DOMAINS.items() if v not in ("DETAIL", "LAYER")}
+FOREACH_DOMAINS = {k: v for k, v in RUNOVER_DOMAINS.items() if v not in ("DETAIL", "LAYER", "VOXEL")}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -938,7 +939,7 @@ class _Parser:
             word = payload.strip().lower()
             if word not in RUNOVER_DOMAINS:
                 raise FormulaError(f"unknown run-over domain '{payload}' — use point, vertex, prim, edge, "
-                                   f"curve, instance or detail", line)
+                                   f"curve, instance, voxel or detail", line)
             return SBlock(line, "runover", RUNOVER_DOMAINS[word], body, text=text)
         if kind == "repeat":
             if not payload.strip():
@@ -1028,7 +1029,7 @@ class _Parser:
                 raise self._err("#runover can't be used inside an #include", line)
             dom = rest.split()[0].lower() if rest else ""
             if dom not in RUNOVER_DOMAINS:
-                raise self._err("#runover needs a domain: point, vertex, prim, edge, curve, instance or detail",
+                raise self._err("#runover needs a domain: point, vertex, prim, edge, curve, instance, voxel or detail",
                                 line)
             if self.prog.runover is not None:
                 raise self._err(f"#runover was already set on line {self.prog.runover_line}", line)

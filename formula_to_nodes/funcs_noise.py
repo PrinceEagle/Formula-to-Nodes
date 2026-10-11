@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Noise and random functions."""
 
+import ast
+
 from .core import FLOAT, INT, BOOL, VECTOR, Val, FUNCS, reg, FormulaError
 
 reg("noise", "noise(pos [, scale, detail, roughness])", "Perlin noise 0..1 (float pos = 1D noise)",
@@ -154,7 +156,10 @@ class NoiseFuncs:
     def f_rand(self, node, name):
         (seed,) = self.args(node, name, {1})
         want_vec = self.hinted(node) == VECTOR
-        if seed.t == VECTOR:
+        fractional = any(isinstance(c, ast.Constant) and isinstance(c.value, float) and not c.value.is_integer()
+                         for c in ast.walk(node.args[0]))
+        if seed.t == VECTOR or (seed.t == FLOAT and fractional):
+            # like VEX, rand(@ptnum + 0.37) is a different stream from rand(@ptnum)
             sid = self.f_hash_val(seed, None)
         else:
             sid = self.coerce(seed, INT, "rand()'s seed")

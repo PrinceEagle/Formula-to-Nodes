@@ -255,7 +255,7 @@ FUNCS = {}
 CATEGORY_ORDER = ["Math", "Vector", "Mapping & blending", "Noise & random", "Color",
                   "Rotation & matrix", "Geometry", "Sampling", "Topology", "Aggregates",
                   "Arrays", "Text & messages", "Parameters", "Effects", "Geometry operations",
-                  "Conversion"]
+                  "Volumes", "Conversion"]
 
 
 def reg(names, sig, doc, category, handler, feature=None, effect=False, **data):

@@ -317,6 +317,14 @@ def _add_items(b, n):
         while len(coll) < len(n.items):
             coll.new()
         return
+    if attr == "rasterize_items":            # Rasterize Points (5.3): new(name), then the item's type
+        for stype, name in n.items:
+            coll.new(name).type = stype
+        return
+    if attr == "combine_list_items":         # Combine List (5.3) starts with one item
+        while len(coll) < len(n.items):
+            coll.new()
+        return
     items = n.items
     if attr in ("repeat_items", "state_items"):
         items = items[len(coll):]       # keep the default Geometry item (and its socket identifiers)

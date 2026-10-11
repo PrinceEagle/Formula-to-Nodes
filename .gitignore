@@ -3,3 +3,6 @@ __pycache__/
 /dist/
 /build/
 *.blend1
+promo/out/
+promo/logs/
+__pycache__/

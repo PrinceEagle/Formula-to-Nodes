@@ -10,7 +10,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from formula_to_nodes import compiler, recipes  # noqa: E402
+from formula_to_nodes import caps, compiler, recipes  # noqa: E402
 
 try:
     import bpy  # noqa: F401
@@ -26,7 +26,7 @@ class TestRecipesCompile(unittest.TestCase):
                 src = r.script
                 if r.test.get("prelude") and not r.test.get("split"):
                     src = r.test["prelude"] + "\n" + src
-                compiler.compile_source(src)
+                compiler.compile_source(src, target=caps.Target(max(r.blender, caps.DEFAULT_TARGET)))
 
     def test_unique_keys_and_categories(self):
         keys = [r.key for r in recipes.RECIPES]
@@ -60,6 +60,8 @@ class TestRecipesEvaluate(unittest.TestCase):
         H.ensure_registered()
         from formula_to_nodes import build
         for r in recipes.RECIPES:
+            if tuple(bpy.app.version[:3]) < r.blender:
+                continue
             with self.subTest(r.key):
                 H.clear()
                 for c in list(bpy.data.collections):
@@ -84,7 +86,7 @@ class TestRecipesEvaluate(unittest.TestCase):
                     mods.append(mod)
                 scene = bpy.context.scene
                 scene.frame_set(1)
-                for f in (2, 3):
+                for f in range(2, 2 + spec.get("frames", 2)):
                     scene.frame_set(f)
                 dg = bpy.context.evaluated_depsgraph_get()
                 geo = ob.evaluated_get(dg).evaluated_geometry()
@@ -100,6 +102,8 @@ class TestRecipesEvaluate(unittest.TestCase):
                 ip = geo.instances_pointcloud()
                 if ip is not None:
                     size += len(ip.points)
+                if geo.volume is not None:
+                    size += len(geo.volume.grids) if hasattr(geo.volume, "grids") else 1
                 self.assertGreater(size, 0, r.key)
                 scene.frame_set(1)
 

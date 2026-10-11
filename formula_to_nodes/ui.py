@@ -658,12 +658,19 @@ class FORMULA_MT_Recipes(Menu):
     bl_label = "Recipes"
 
     def draw(self, context):
-        flow = self.layout.column_flow(columns=3)
+        flow = self.layout.column_flow(columns=4)
+        have = tuple(bpy.app.version[:3])
         for cat, items in recipes.by_category().items():
+            if not items:
+                continue
             col = flow.column()
             col.label(text=cat)
             for r in items:
-                col.operator("node.formula_load_recipe", text=r.title).key = r.key
+                ok = have >= r.blender
+                row = col.row()
+                row.enabled = ok
+                text = r.title if ok else f"{r.title} (Blender {r.blender[0]}.{r.blender[1]}+)"
+                row.operator("node.formula_load_recipe", text=text).key = r.key
 
 
 class _PanelBase:

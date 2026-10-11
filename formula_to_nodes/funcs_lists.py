@@ -66,6 +66,13 @@ class ListFuncs:
         n = len(items)
         if n == 0:
             return self._field_to_list(Val(INT, c=0), Val(et, c=self._zero_c(et)), et)
+        if n > 1 and self.target.supports("combine_list") and et in SOCKET_DTYPE:
+            # Blender 5.3: one Combine List node instead of Field to List + Index Switch
+            node = self.g.add("GeometryNodeCombineList", {"data_type": SOCKET_DTYPE[et]},
+                              {f"Item_{k}": self.inp(v, et) for k, v in enumerate(items)},
+                              items=[(SOCKET_DTYPE[et], str(k)) for k in range(n)],
+                              items_attr="combine_list_items")
+            return Val(list_type(et), c=n, o=node.out("List"))
         if n == 1:
             value = items[0]
         else:

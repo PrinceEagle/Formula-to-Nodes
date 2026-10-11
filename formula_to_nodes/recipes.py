@@ -10,21 +10,23 @@ Recipe fields
     test     how the test suite runs it: {"kind": "ico"|"grid"|..., "inputs": {...}, "prelude": "..."}
 """
 
-CATEGORIES = ["Masks", "Deformers", "Scatter & Instance", "Growth & Simulation", "Effectors", "Color",
-              "Curves", "Modeling", "Utility"]
+CATEGORIES = ["Masks", "Deformers", "Scatter & Instance", "Growth & Simulation", "Smoke & Fire", "Liquids",
+              "Volumes", "Effectors", "Color", "Curves", "Modeling", "Utility"]
+VOLUME_CATEGORIES = ("Smoke & Fire", "Volumes")     # recipes built on grids
 
 
 class Recipe:
-    __slots__ = ("key", "title", "category", "description", "script", "tags", "needs", "test")
+    __slots__ = ("key", "title", "category", "description", "script", "tags", "needs", "test", "blender")
 
-    def __init__(self, key, title, category, description, script, tags=(), needs=(), test=None):
+    def __init__(self, key, title, category, description, script, tags=(), needs=(), test=None, blender=(5, 2, 0)):
         self.key, self.title, self.category, self.description = key, title, category, description
         self.script, self.tags, self.needs, self.test = script.strip() + "\n", tuple(tags), tuple(needs), test or {}
+        self.blender = tuple(blender)    # oldest Blender the recipe builds on
 
     def as_dict(self):
         return {"key": self.key, "title": self.title, "category": self.category,
                 "description": self.description, "tags": list(self.tags), "needs": list(self.needs),
-                "script": self.script}
+                "blender": ".".join(str(x) for x in self.blender), "script": self.script}
 
 
 R = Recipe
@@ -336,7 +338,7 @@ simulate {
 }
 """, tags=("boids", "flock", "swarm", "simulation")),
 
-    R("wave_pool", "Wave pool", "Growth & Simulation",
+    R("wave_pool", "Wave pool", "Liquids",
       "Raindrop ripples on a grid that spread and fade.",
       """
 simulate {
@@ -528,6 +530,304 @@ runover(detail) {
       """
 v@rest = v@P;
 """, tags=("rest", "texture", "store")),
+
+    # ── Smoke & Fire ─────────────────────────────────────────────────────────
+    R("smoke_plume", "Smoke plume", "Smoke & Fire",
+      "A real 3D smoke solver on OpenVDB grids: buoyancy, turbulence and vorticity confinement, "
+      "made incompressible by Blender's Poisson solver and moved with MacCormack advection. "
+      "Give the object a Principled Volume material.",
+      """
+// voxel box and size: ~200k voxels plays back interactively
+float vs = chf("Domain/voxel_size", 0.04, min=0.01);
+volumebounds(chv("Domain/min", {-1, -1, 0}), chv("Domain/max", {1, 1, 3}), vs);
+vector src = chv("Source/center", {0, 0, 0.3});
+float radius = chf("Source/radius", 0.25, min=0.01);
+
+simulate {
+    runover(voxel) {
+        // emit a noisy puff, let the old smoke thin out and cool down
+        float puff = smoothstep(radius, radius * 0.4, length(@P - src))
+                   * fit(noise(@P * 4 + {0, 0, -2} * @Time), 0.3, 0.7, 0, 1);
+        f@density = max(f@density * (1 - chf("dissipation", 0.08) * deltatime), puff);
+        f@temperature = max(f@temperature * (1 - chf("cooling", 0.7) * deltatime), puff);
+        // hot smoke rises; curl noise breaks up the column
+        vector turb = curlnoise(@P, chf("Turbulence/scale", 1.5), @Time * 0.3);
+        v@vel += ({0, 0, 1} * f@temperature * chf("buoyancy", 5)
+                  + turb * chf("Turbulence/strength", 1.5) * f@density) * deltatime;
+    }
+    // vorticity confinement: feed energy back into the small swirls
+    volumecurl("vel", "curl");
+    runover(voxel) { f@swirl = length(v@curl); }
+    runover(voxel) {
+        vector towards = normalize(volumegradient(0, "swirl", @P) + {0, 0, 1e-6});
+        v@vel += cross(towards, v@curl) * chf("vorticity", 1.5) * vs * deltatime;
+    }
+    volumeproject("vel");                        // incompressible: one Poisson solve
+    volumeadvect("vel", "vel", deltatime);       // MacCormack
+    volumeadvect("density", "vel", deltatime);
+    volumeadvect("temperature", "vel", deltatime);
+}
+keep("volume");
+""", tags=("smoke", "pyro", "fluid", "volume", "vdb", "simulation", "poisson"),
+      needs=("a Principled Volume material on the object",), test={"kind": "plane", "frames": 3}),
+
+    R("fire", "Fire", "Smoke & Fire",
+      "Fuel pours from a disc, burns into heat and soot, and the heat drives the flames up. "
+      "Render the temperature grid with the Principled Volume's blackbody emission.",
+      """
+float vs = chf("Domain/voxel_size", 0.03, min=0.01);
+volumebounds(chv("Domain/min", {-0.75, -0.75, 0}), chv("Domain/max", {0.75, 0.75, 2.4}), vs);
+vector src = chv("Fuel/center", {0, 0, 0.1});
+float radius = chf("Fuel/radius", 0.3, min=0.01);
+
+simulate {
+    runover(voxel) {
+        // a flat, flickering disc of fuel
+        float disc = smoothstep(radius, radius * 0.4, length((@P - src) * {1, 1, 3}));
+        float flicker = fit(noise(@P * 7 + {0, 0, -5} * @Time), 0.3, 0.7, 0, 1);
+        float fuel = max(f@fuel, disc * flicker);
+        // fuel burns into heat and soot; the heat cools and the soot thins out
+        float burn = fuel * min(chf("Burn/rate", 8) * deltatime, 1);
+        f@fuel = fuel - burn;
+        f@temperature = min(f@temperature * (1 - chf("Burn/cooling", 2.2) * deltatime) + burn * chf("Burn/heat", 4), 2);
+        f@density = f@density * (1 - chf("Smoke/dissipation", 0.5) * deltatime) + burn * chf("Smoke/soot", 0.5);
+        vector turb = curlnoise(@P, chf("Turbulence/scale", 3), @Time * 0.8);
+        v@vel += ({0, 0, 1} * f@temperature * chf("buoyancy", 7)
+                  + turb * chf("Turbulence/strength", 4) * min(f@temperature, 1)) * deltatime;
+    }
+    volumecurl("vel", "curl");
+    runover(voxel) { f@swirl = length(v@curl); }
+    runover(voxel) {
+        vector towards = normalize(volumegradient(0, "swirl", @P) + {0, 0, 1e-6});
+        v@vel += cross(towards, v@curl) * chf("vorticity", 2.5) * vs * deltatime;
+    }
+    volumeproject("vel");
+    volumeadvect("vel", "vel", deltatime);
+    volumeadvect("fuel", "vel", deltatime);
+    volumeadvect("temperature", "vel", deltatime);
+    volumeadvect("density", "vel", deltatime);
+}
+keep("volume");
+""", tags=("fire", "flame", "pyro", "combustion", "volume", "simulation"),
+      needs=("a Principled Volume material with blackbody intensity",), test={"kind": "plane", "frames": 3}),
+
+    R("smoke_ring", "Smoke ring", "Smoke & Fire",
+      "A short push through a round hole rolls up into a vortex ring that travels and slowly grows — "
+      "the incompressible solver does all the work, there's no buoyancy at all.",
+      """
+float vs = chf("Domain/voxel_size", 0.035, min=0.01);
+volumebounds(chv("Domain/min", {-1.2, -1.2, 0}), chv("Domain/max", {1.2, 1.2, 3.6}), vs);
+float radius = chf("Puff/radius", 0.35, min=0.05);
+float height = chf("Puff/height", 0.3);
+
+simulate {
+    runover(voxel) {
+        // a thin disc that pushes upward for the first few frames
+        vector p = @P - {0, 0, height};
+        float disc = smoothstep(radius, radius * 0.85, length(set(p.x, p.y, 0)))
+                   * smoothstep(vs * 2.5, 0, abs(p.z));
+        float on = @Frame <= chi("Puff/frames", 8) ? 1 : 0;
+        f@density = max(f@density, disc * on);
+        v@vel = lerp(v@vel, {0, 0, chf("Puff/speed", 3)}, disc * on);
+    }
+    volumeproject("vel");
+    volumeadvect("vel", "vel", deltatime);
+    volumeadvect("density", "vel", deltatime);
+}
+keep("volume");
+""", tags=("smoke ring", "vortex", "toroidal", "fluid", "volume", "simulation"),
+      needs=("a Principled Volume material on the object",), test={"kind": "plane", "frames": 3}),
+
+    R("smoke_from_object", "Smoke from an object", "Smoke & Fire",
+      "Smoke streams off the surface of the 'Emitter' object — animate it and the trail follows. "
+      "Hot near the surface, so it rises and curls.",
+      """
+float vs = chf("Domain/voxel_size", 0.04, min=0.01);
+volumebounds(chv("Domain/min", {-1.5, -1.5, 0}), chv("Domain/max", {1.5, 1.5, 3}), vs);
+
+simulate {
+    runover(voxel) {
+        // a thin shell around the emitter's surface, broken up by noise
+        float d = xyzdist(chobj("Emitter"), @P);
+        float shell = smoothstep(chf("Emit/thickness", 0.06), 0, d)
+                    * fit(noise(@P * 6 + {0, 0, -3} * @Time), 0.4, 0.7, 0, 1);
+        f@density = max(f@density * (1 - chf("dissipation", 0.15) * deltatime), shell);
+        f@temperature = max(f@temperature * (1 - chf("cooling", 1) * deltatime), shell);
+        v@vel += {0, 0, 1} * f@temperature * chf("buoyancy", 4) * deltatime;
+    }
+    volumeproject("vel");
+    volumeadvect("vel", "vel", deltatime);
+    volumeadvect("density", "vel", deltatime);
+    volumeadvect("temperature", "vel", deltatime);
+}
+keep("volume");
+""", tags=("smoke", "emitter", "trail", "object", "volume", "simulation"),
+      needs=("Emitter: the object that emits smoke", "a Principled Volume material"),
+      test={"kind": "plane", "frames": 3, "inputs": {"Emitter": "cube"}}),
+
+    # ── Liquids ──────────────────────────────────────────────────────────────
+    R("shallow_water", "Shallow water (dam break)", "Liquids",
+      "A column of water collapses and sloshes around a tank: the shallow-water equations with a "
+      "two-step Lax–Wendroff scheme. No pressure solve — the height IS the solution — and the time "
+      "step adapts to the fastest wave, so it can't blow up.",
+      """
+int n = chi("resolution", 150, min=16);
+float size = chf("size", 2, min=0.1);
+grid(size, size, n, n);
+float dx = size / (n - 1);
+float g = chf("gravity", 9.8);
+
+// fluxes of U = (depth, x momentum, y momentum)
+vector fx(vector U; float g) { return set(U.y, U.y * U.y / U.x + 0.5 * g * U.x * U.x, U.y * U.z / U.x); }
+vector fy(vector U; float g) { return set(U.z, U.y * U.z / U.x, U.z * U.z / U.x + 0.5 * g * U.x * U.x); }
+
+simulate {
+    init {
+        float R = chf("Dam/radius", 0.3);
+        float r = length(set(@P.x, @P.y, 0) - chv("Dam/center", {-0.45, -0.45, 0}));
+        v@U = set(chf("depth", 0.15) + chf("Dam/height", 0.6) * smoothstep(R, R - dx * 3, r), 0, 0);
+    }
+    // time step from the fastest wave (CFL), split into as many substeps as needed
+    float c = maxof(sqrt(g * v@U.x) + length(set(v@U.y, v@U.z, 0)) / v@U.x);
+    int steps = int(clamp(ceil(deltatime * c / (chf("cfl", 0.7) * dx)), 1, 64));
+    float dt = deltatime / steps;
+    int ix = @ptnum / n;
+    int iy = @ptnum % n;
+    repeat(steps) {
+        // 1. half step to the east and north faces (walls mirror the momentum)
+        vector U = v@U;
+        vector Ue = ix < n - 1 ? point(0, "U", @ptnum + n) : set(U.x, -U.y, U.z);
+        vector Un = iy < n - 1 ? point(0, "U", @ptnum + 1) : set(U.x, U.y, -U.z);
+        v@Ux = (U + Ue) * 0.5 - (fx(Ue, g) - fx(U, g)) * (dt / (2 * dx));
+        v@Uy = (U + Un) * 0.5 - (fy(Un, g) - fy(U, g)) * (dt / (2 * dx));
+        // 2. full step from the face fluxes (the west and south walls only push back)
+        vector wall = set(0, 0.5 * g * U.x * U.x, 0);
+        vector Fw = ix > 0 ? fx(point(0, "Ux", @ptnum - n), g) : wall;
+        vector Gs = iy > 0 ? fy(point(0, "Uy", @ptnum - 1), g) : set(0, 0, wall.y);
+        vector next = U - (fx(v@Ux, g) - Fw) * (dt / dx) - (fy(v@Uy, g) - Gs) * (dt / dx);
+        v@U = set(max(next.x, 0.001), next.y, next.z);
+    }
+    // a touch of viscosity keeps the bores clean
+    v@U = lerp(v@U, blur(v@U, 1), chf("smoothing", 0.04));
+}
+f@depth = v@U.x;
+f@speed = length(set(v@U.y, v@U.z, 0)) / v@U.x;
+@P.z = f@depth * chf("height_scale", 1);
+@Cd = colorramp("water", fit(f@speed, 0, chf("Color/max_speed", 2), 0, 1), "ocean");
+""", tags=("water", "shallow water", "dam break", "waves", "fluid", "simulation"), test={"frames": 3}),
+
+    R("bubbles", "Bubbles", "Liquids",
+      "Air bubbles rise through a tank: bigger ones rise faster, they spiral as they go, touching "
+      "bubbles merge (their volumes add up) and they pop at the surface and start again at the bottom.",
+      """
+points(chi("count", 600, min=1));
+vector tank = chv("Tank/size", {1.2, 1.2, 2});
+float rmin = chf("Size/min", 0.01);
+float rmax = chf("Size/max", 0.045);
+
+simulate {
+    init {
+        @P = set((rand(@ptnum) - 0.5) * tank.x, (rand(@ptnum + 0.37) - 0.5) * tank.y, rand(@ptnum + 0.71) * tank.z);
+        @pscale = lerp(rmin, rmax, pow(rand(@ptnum + 0.13), 3));
+        f@seed = rand(@ptnum + 0.91);
+    }
+    // terminal speed grows with the square root of the size; a helix wobble on top
+    float rise = chf("speed", 1.2) * sqrt(@pscale / 0.03);
+    float phase = @Time * chf("Wobble/rate", 9) * (0.6 + f@seed) + f@seed * 50;
+    vector wobble = set(cos(phase), sin(phase), 0) * @pscale * chf("Wobble/amount", 6);
+    vector drift = curlnoise(@P, chf("drift_scale", 1.2), @Time * 0.4) * chf("drift", 0.15);
+    @P += (set(0, 0, rise) + wobble + drift) * deltatime;
+    // merge: the smaller of two touching bubbles is swallowed by the bigger one
+    int nb = nearpoint(0, @P);
+    float nr = point(0, "pscale", nb);
+    bool touching = distance(@P, point(0, "P", nb)) < (@pscale + nr) * 0.9;
+    bool smaller = @pscale < nr || (@pscale == nr && @ptnum < nb);
+    bool reborn = (touching && smaller) || @P.z > tank.z;
+    if (touching && !smaller) {
+        @pscale = min(pow(pow(@pscale, 3) + pow(nr, 3), 1.0 / 3), rmax * 2);
+    }
+    if (reborn) {
+        float k = @Frame + f@seed * 1000;
+        @P = set((rand(k) - 0.5) * tank.x, (rand(k + 0.37) - 0.5) * tank.y, 0);
+        @pscale = lerp(rmin, rmax, pow(rand(k + 0.13), 3));
+    }
+}
+""", tags=("bubbles", "water", "foam", "particles", "merge", "simulation"), test={"frames": 3}),
+
+    # ── Volumes ──────────────────────────────────────────────────────────────
+    R("cloud", "Cloud from a mesh", "Volumes",
+      "Turns any closed mesh into a cumulus cloud: the inside of the mesh, eroded by billowing noise. "
+      "Model the cloud's shape with spheres, then add this.",
+      """
+float vs = chf("voxel_size", 0.025, min=0.005);
+float pad = chf("Noise/amount", 0.25);
+volumefrommesh("inside", vs, "fog");
+volumebounds(getbbox_min(0) - pad, getbbox_max(0) + pad, vs);
+runover(voxel) {
+    // signed distance: negative inside the mesh
+    float d = xyzdist(0, @P);
+    float sd = volumesample(0, "inside", @P) > 0.5 ? -d : d;
+    // billows: big round lumps plus fine wisps
+    float billow = abs(fbm(@P, chf("Noise/scale", 2.5), 5, 0.5)) * 2;
+    float edge = chf("softness", 0.05);
+    f@density = smoothstep(edge, -edge, sd + billow * pad - pad * 0.5);
+}
+volumeremove("inside");
+keep("volume");
+""", tags=("cloud", "cumulus", "fog", "volume", "vdb"), needs=("a closed mesh",
+                                                              "a Principled Volume material"),
+      test={"kind": "ico"}),
+
+    R("galaxy", "Spiral galaxy", "Volumes",
+      "Thousands of points in spiral arms, splatted into glowing dust with Blender 5.3's Rasterize "
+      "Points — colour too. The stars stay as points.",
+      """
+points(chi("stars", 20000, min=1));
+int arms = chi("arms", 3, min=1);
+float r = pow(rand(@ptnum), 0.6) * chf("radius", 1.5);
+float arm = floor(rand(@ptnum + 0.1) * arms);
+float spread = (rand(@ptnum + 0.2) - 0.5) * chf("spread", 0.7) / (r + 0.25);
+float a = r * chf("twist", 3) + arm * 2 * pi / arms + spread;
+@P = set(cos(a) * r, sin(a) * r, (rand(@ptnum + 0.3) - 0.5) * chf("thickness", 0.12) * (1.3 - r / 1.5));
+@Cd = lerp({1, 0.72, 0.45}, {0.45, 0.6, 1}, smoothstep(0.1, 1.1, r));
+@pscale = 0.004 * (0.5 + rand(@ptnum + 0.4));
+float vs = chf("voxel_size", 0.02, min=0.003);
+rasterize("density", 1, vs, "cubic");
+rasterize("color", v@Cd, vs, "cubic");
+volumeblur("density", 1, 2);
+""", tags=("galaxy", "nebula", "space", "stars", "rasterize", "volume"),
+      needs=("a volume material reading 'density' and 'color'",), blender=(5, 3, 0)),
+
+    R("lava_lamp", "Lava lamp (metaballs)", "Volumes",
+      "Blobs heat up at the bottom, rise, cool and sink. Each frame their spheres become one signed "
+      "distance grid, smoothed so neighbours melt together, and then a mesh.",
+      """
+points(chi("blobs", 24, min=1));
+float h = chf("Lamp/height", 2);
+float w = chf("Lamp/radius", 0.35);
+simulate {
+    init {
+        float a = rand(@ptnum) * 2 * pi;
+        @P = set(cos(a), sin(a), 0) * w * 0.6 * rand(@ptnum + 0.5) + set(0, 0, rand(@ptnum + 0.7) * h);
+        @pscale = lerp(chf("Blob/min", 0.08), chf("Blob/max", 0.18), rand(@ptnum + 0.3));
+        f@heat = rand(@ptnum + 0.9);
+    }
+    // heated at the bottom, cooled at the top: warm wax rises, cold wax sinks
+    f@heat = clamp(f@heat + (@P.z < h * 0.15 ? chf("heating", 0.5) : -chf("cooling", 0.12)) * deltatime, 0, 1);
+    v@vel += set(0, 0, (f@heat - 0.5) * chf("buoyancy", 0.8)) * deltatime;
+    v@vel *= 1 - chf("drag", 1.5) * deltatime;
+    @P += v@vel * deltatime;
+    // stay inside the glass
+    vector flat = set(@P.x, @P.y, 0);
+    if (length(flat) > w - @pscale) { @P = set(0, 0, @P.z) + normalize(flat) * (w - @pscale); }
+    @P.z = clamp(@P.z, 0, h);
+}
+float vs = chf("voxel_size", 0.02, min=0.004);
+volumefrompoints("wax", vs);
+sdfsmooth("wax", chi("melt", 3), 2);
+volumetomesh("wax", 0);
+shadesmooth(1);
+""", tags=("metaballs", "lava lamp", "blobs", "sdf", "volume", "simulation"), test={"frames": 3}),
 ]
 
 BY_KEY = {r.key: r for r in RECIPES}

@@ -29,7 +29,8 @@ reg("instance", "instance(source [, index])",
     'copies source onto every point — chobj("x"), chcoll("x") (index picks a child) or 1 (Input 1); '
     "uses p@orient, v@scale and @pscale like Houdini's Copy to Points; later lines run over the instances",
     "Geometry operations", "g_instance", effect=True)
-reg("realize", "realize()", "turns instances into real geometry (back to running over points)",
+reg("realize", "realize([preserve_normals])",
+    "turns instances into real geometry (back to running over points); 1 keeps normals of mirrored instances (5.3)",
     "Geometry operations", "g_realize", effect=True)
 reg("subdivide", "subdivide(levels)", "simple subdivision (keeps the shape)", "Geometry operations", "g_simple",
     effect=True, node="GeometryNodeSubdivideMesh", gin="Mesh", gout="Mesh", args=(("Level", INT, 1),))
@@ -54,7 +55,8 @@ reg("bevel", "bevel(width [, segments])", "bevels edges (inside an if: only thos
 reg("resample", "resample(count)", "resamples curves to count points each", "Geometry operations", "g_simple",
     effect=True, node="GeometryNodeResampleCurve", gin="Curve", gout="Curve", sel="Selection",
     args=(("Count", INT, 10),), fixed={"Mode": "Count"})
-reg("sweep", "sweep(radius [, resolution])", "turns curves into tubes (radius may vary per point)",
+reg("sweep", "sweep(radius [, resolution, miter])",
+    "turns curves into tubes (radius may vary per point); miter=1 keeps the thickness even at sharp corners (5.3)",
     "Geometry operations", "g_sweep", effect=True)
 reg("tocurves", "tocurves()", "mesh edges → curves", "Geometry operations", "g_simple", effect=True,
     node="GeometryNodeMeshToCurve", gin="Mesh", gout="Curve", sel="Selection", props={"mode": "EDGES"})
@@ -83,7 +85,9 @@ reg("sortpoints", "sortpoints(weight [, group])", "reorders points by weight (sm
 class GeoOps:
     # ── deferred effects ───────────────────────────────────────────────────
     def _flush_effects(self, ctx):
-        """Apply pending removals, then join pending additions."""
+        """Store pending voxel writes, apply pending removals, then join pending additions."""
+        if ctx.voxels:
+            self.flush_voxels(ctx)
         if ctx.removals:
             for dom, (flag, mode) in list(ctx.removals.items()):
                 d = self.g.add("GeometryNodeDeleteGeometry", {"domain": dom, "mode": mode},
@@ -308,8 +312,14 @@ class GeoOps:
         return Val(VOID)
 
     def g_realize(self, node, name):
-        self.args(node, name, {0})
-        self._geo_op(name, "GeometryNodeRealizeInstances", {}, {}, "Geometry", "Geometry", sel_key="Selection",
+        vals = self.args(node, name, {0, 1})
+        inputs = {}
+        if vals:
+            keep = self._single(self.coerce(vals[0], BOOL, "realize()'s preserve normals"), "preserve normals")
+            if not (keep.is_const and not keep.c):
+                self.require("preserve_normals")
+                inputs["Preserve Normals"] = self.inp(keep, BOOL)
+        self._geo_op(name, "GeometryNodeRealizeInstances", {}, inputs, "Geometry", "Geometry", sel_key="Selection",
                      reason="realize()")
         if self.domain == "INSTANCE":
             self.scope.domain = "POINT"
@@ -341,13 +351,18 @@ class GeoOps:
         return Val(VOID)
 
     def g_sweep(self, node, name):
-        vals = self.args(node, name, {1, 2})
-        res = self._single(self.coerce(vals[1], INT, "sweep()'s resolution"), "the resolution") if len(vals) == 2 \
+        vals = self.args(node, name, {1, 2, 3})
+        res = self._single(self.coerce(vals[1], INT, "sweep()'s resolution"), "the resolution") if len(vals) >= 2 \
             else Val(INT, c=12)
         circle = self.g.add("GeometryNodeCurvePrimitiveCircle", {"mode": "RADIUS"},
                             {"Resolution": self.inp(res, INT), "Radius": 1.0})
         inputs = {"Profile Curve": circle.out("Curve"), "Scale": self.inp(vals[0], FLOAT, "sweep()'s radius"),
                   "Fill Caps": True}
+        if len(vals) == 3:
+            miter = self._single(self.coerce(vals[2], BOOL, "sweep()'s miter"), "miter")
+            if not (miter.is_const and not miter.c):
+                self.require("miter_scale")
+                inputs["Miter Scale"] = self.inp(miter, BOOL)
         self._geo_op(name, "GeometryNodeCurveToMesh", {}, inputs, "Curve", "Mesh", reason="sweep()")
         self.point_normals = False
         return Val(VOID)

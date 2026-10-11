@@ -21,7 +21,7 @@
 
 import os
 
-ADDON_VERSION = "3.0.0"
+ADDON_VERSION = "3.1.0"
 
 
 def _read_version():

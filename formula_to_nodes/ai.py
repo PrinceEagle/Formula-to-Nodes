@@ -135,6 +135,32 @@ GEOMETRY CHANGES (statements on their own line)
   transform(t, r, s) setmaterial(chmat("m")) shadesmooth(1). Inside an if they apply to the
   selected elements only (where the operation has a selection).
 
+VOLUMES (OpenVDB grids, like Houdini's Volume Wrangle and VDB nodes)
+- volumebounds(min, max, voxelsize) sets the voxel box; runover(voxel) { ... } then runs per voxel.
+  Inside it every @name is a grid (f@density, v@vel ...): reads sample the grid at the voxel,
+  writes create/replace it. @P = voxel centre, @ix @iy @iz = voxel index. No @ptnum, no geometry ops.
+- Whole-grid operations (statements, outside runover(voxel)):
+  volumeadvect("grid", "vel", dt [, "maccormack"|"bfecc"|"rk3"|"semi"])   move along a velocity grid
+  volumeproject("vel" [, iterations])   make velocity divergence-free (incompressible smoke/liquid)
+  volumesolve("rhs", "out")   Poisson solve ∇²out = rhs        volumeblur("grid", width, iterations)
+  volumecurl("vel", "out")  volumedivergence("vel", "out")  volumegrad("grid", "out")
+  rasterize("grid", value, voxelsize [, "cubic"])   points → grid (per-point value; Blender 5.3)
+  volumefrommesh("grid", voxelsize [, "sdf"|"fog"])   volumetomesh("grid", threshold)
+  volumeremove("grid")   keep("volume")  (drop the mesh etc., e.g. after a smoke sim)
+- Read grids anywhere: volumesample(0, "grid", pos), volumesamplev(...), volumegradient(...).
+- A smoke step: inside simulate { }: runover(voxel) { emit, buoyancy into v@vel }, then
+  volumeproject("vel"); volumeadvect("vel", "vel", deltatime); volumeadvect("density", "vel", deltatime);
+
+PERFORMANCE (Geometry Nodes is fastest when whole-geometry nodes do the heavy lifting)
+- Prefer the built-in solvers to hand-written loops: volumeproject() (one Poisson node in 5.3)
+  instead of Jacobi repeat loops; blur() instead of averaging neighbours yourself; volumeadvect()
+  instead of tracing positions by hand.
+- Every write in runover(voxel) is one full pass over the voxels: compute in locals and write
+  each grid once. Keep voxel counts sensible (≈100–300k voxels for interactive smoke).
+- In simulations derive the time step from the cell size (CFL ≤ 1) instead of exposing a raw dt;
+  substeps (repeat inside simulate) multiply the cost — use as few as stability allows.
+- point()/nearpoint()/xyzdist() are lookups per element: fine once, costly inside big repeat loops.
+
 PARAMETERS (become inputs on the node and the modifier — prefer them over magic numbers)
 - chf("name", default, min=, max=, tip="tooltip")  chi()  chv("name", {x, y, z})  chb()  chs()  chp()
 - "Folder/name" puts the input in a collapsible panel: chf("Shape/height", 1)

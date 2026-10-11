@@ -9,7 +9,7 @@ The same table filters the function reference shown to people and to the AI.
 """
 
 MIN_BLENDER = (5, 2, 0)
-TESTED = ((5, 2, 2),)          # versions the test suite evaluated geometry on
+TESTED = ((5, 2, 2), (5, 3, 0))   # versions the test suite evaluated geometry on
 DEFAULT_TARGET = (5, 2, 0)
 
 # key: (minimum version, what it enables, node types that must exist)
@@ -29,6 +29,18 @@ FEATURES = {
                     ("GeometryNodeFieldAverage", "GeometryNodeFieldMinAndMax", "GeometryNodeFieldVariance")),
     "string_fields": ((5, 3, 0), "per-element text: s@name attributes and text that varies per element", ()),
     "empty_modifiers": ((5, 3, 0), "Geometry Nodes modifiers on empties (effectors)", ()),
+    # volumes (OpenVDB grids)
+    "volume_grids": ((5, 2, 0), "volumes: runover(voxel) { }, volumeadvect(), volumeblur(), volumecurl()",
+                     ("GeometryNodeFieldToGrid", "GeometryNodeCubeGridTopology", "GeometryNodeStoreNamedGrid",
+                      "GeometryNodeGetNamedGrid", "GeometryNodeSampleGrid", "GeometryNodeGridAdvect")),
+    "poisson": ((5, 3, 0), "the native Poisson solver: volumeproject() / volumesolve() in one node "
+                           "(older versions iterate)", ("GeometryNodeGridSolvePoisson",)),
+    "rasterize_points": ((5, 3, 0), "rasterize(): points → volume grids", ("GeometryNodeRasterizePoints",)),
+    # Blender 5.3 nodes that make existing features smaller or faster
+    "combine_list": ((5, 3, 0), "array literals built with one Combine List node", ("GeometryNodeCombineList",)),
+    "vector_component": ((5, 3, 0), "v[i] with a variable index in one node", ("FunctionNodeGetVectorComponent",)),
+    "miter_scale": ((5, 3, 0), "sweep(radius, resolution, 1): even tube thickness at sharp corners", ()),
+    "preserve_normals": ((5, 3, 0), "realize(1) keeps normals of mirrored instances", ()),
 }
 
 

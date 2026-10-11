@@ -1,3 +1,46 @@
+# Formula to Nodes 3.1.0 — Blender 5.3
+
+Volumes, real fluid solvers and the new Blender 5.3 nodes. Still works on 5.2 (features that need
+5.3 say so, and the solvers fall back to iterating).
+
+## Volumes (OpenVDB grids)
+- **`runover(voxel) { }`** — a Volume Wrangle: every `@name` is a grid, `@P` the voxel centre,
+  `@ix @iy @iz` its index. All writes in a block go through **one** Field to Grid node, so shared
+  maths runs once per voxel.
+- **`volumebounds(min, max, voxelsize)`** sets the voxel box (cube voxels, rounded up).
+- Whole-grid operations: `volumeadvect` (MacCormack, BFECC, RK3/4, semi-Lagrangian),
+  **`volumeproject`** (divergence-free velocity with Blender 5.3's **Poisson Solver** — one node
+  instead of hundreds of Jacobi iterations; 5.2 falls back to Jacobi), `volumesolve` (∇²u = f),
+  `volumeblur`, `volumecurl`, `volumedivergence`, `volumegrad`, `volumeremove`.
+- Conversions: **`rasterize()`** (points → grids, 5.3 Rasterize Points, colour too),
+  `volumefrompoints` (metaballs), `volumefrommesh` (SDF or fog), `volumetomesh`,
+  `sdfsmooth`, `sdfoffset`, `sdffillet`, `sdfboolean`.
+- `keep("volume")` (or mesh/points/curves/instances) drops the other geometry types.
+
+## Blender 5.3 nodes
+- Array literals use **Combine List** (one node instead of Field to List + Index Switch).
+- `v[i]` / `getcomp()` with a variable index use **Get Vector Component**.
+- `sweep(radius, resolution, 1)` — Curve to Mesh's **Miter Scale** keeps tubes even at corners.
+- `realize(1)` — Realize Instances' **Preserve Normals** for mirrored instances.
+- Convert Nodes to Script understands all of the above, plus `points()`, `grid()` and grid sampling.
+
+## Recipes (60 in 12 categories)
+- New categories **Smoke & Fire**, **Liquids**, **Volumes**: smoke plume (buoyancy, curl-noise
+  turbulence, vorticity confinement), fire (fuel → heat + soot, blackbody), smoke ring (vortex ring
+  from a single push), smoke from an animated object, shallow-water dam break (Lax–Wendroff, CFL
+  adaptive substeps), bubbles (rise, wobble, merge, pop), cloud from any mesh, spiral galaxy
+  (5.3 rasterize), lava lamp metaballs. Wave pool moved to Liquids.
+- Recipes that need a newer Blender are greyed out in the menu.
+- New colour ramp presets: `ocean`, `smoke`.
+
+## Language
+- `rand(@ptnum + 0.37)` now gives a different stream from `rand(@ptnum)` (like VEX); integer
+  seeds are unchanged.
+
+## AI / MCP
+- The AI prompt documents volumes and a **performance** section (prefer built-in solvers, write
+  each grid once, CFL-derived time steps), so generated scripts are built the fast way.
+
 # Formula to Nodes 3.0.0
 
 A much bigger language, closer to Houdini VEX, plus recipes and nodes → script.

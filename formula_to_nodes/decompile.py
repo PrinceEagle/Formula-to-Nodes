@@ -601,6 +601,9 @@ class Decompiler:
             out = (f"{idx[0]} == {k} ? {self.wrap(vals[k], TERN + 1)} : {self.wrap(out, TERN)}", vals[k][1], TERN)
         return out
 
+    def x_FunctionNodeGetVectorComponent(self, node, sock):      # Blender 5.3
+        return self.call("getcomp", self.value(node, "Vector", "vector"), self.value(node, "Index", "int"))
+
     # textures & random
     def x_ShaderNodeTexNoise(self, node, sock):
         p = node["props"]
@@ -990,6 +993,8 @@ class Decompiler:
         if name in self.lists:
             return self.lists[name]
         node = self.nodes[name]
+        if node["idname"] == "GeometryNodeCombineList":            # Blender 5.3
+            return self._combine_list_ref(name, node)
         if node["idname"] != "GeometryNodeFieldToList":
             raise _Unsupported("arrays built from other arrays")
         count = self.inp(node, "Count")
@@ -1023,6 +1028,39 @@ class Decompiler:
         self.header.append(f"{t} {var}[] = {{{', '.join(items)}}};")
         self.lists[name] = (var, t)
         return var, t
+
+    def _combine_list_ref(self, name, node):
+        etype = node["props"].get("data_type", "FLOAT")
+        t = {"FLOAT": "float", "INT": "int", "BOOLEAN": "int", "VECTOR": "vector", "RGBA": "vector",
+             "ROTATION": "vector4", "STRING": "string"}.get(etype)
+        if t is None:
+            raise _Unsupported(f"arrays of {etype.lower()}")
+        saved_lines, self.lines = self.lines, []
+        try:
+            items = [self.value(node, s["id"])[0] for s in node["inputs"]
+                     if s["id"].startswith("Item_") and s["enabled"]]
+            if self.lines or any(("@" in it) for it in items):
+                raise _Unsupported("an array whose items depend on the geometry")
+        finally:
+            self.lines = saved_lines
+        var = self.fresh("values" if t != "vector" else "vectors")
+        self.header.append(f"{t} {var}[] = {{{', '.join(items)}}};")
+        self.lists[name] = (var, t)
+        return var, t
+
+    def x_GeometryNodeSampleGrid(self, node, sock):
+        lk = self.link(node, "Grid")
+        src = self.nodes[lk[0]] if lk else None
+        if src is None or src["idname"] != "GeometryNodeGetNamedGrid" or self.inp(src, "Name")["links"]:
+            raise _Unsupported("sampling a computed grid")
+        g = self._geometry_ref(src, "Volume")
+        dt = node["props"].get("data_type", "FLOAT")
+        fn, t = {"FLOAT": ("volumesample", "float"), "VECTOR": ("volumesamplev", "vector")}.get(dt, (None, None))
+        if fn is None:
+            raise _Unsupported(f"{dt.lower()} grids")
+        name = self.inp(src, "Name")["value"]
+        return self.call(fn, (g, "int", ATOM), (f'"{name}"', "string", ATOM),
+                         self.value(node, "Position", "vector"), t=t)
 
     def x_GeometryNodeListGetItem(self, node, sock):
         lk = self.link(node, "List")
@@ -1321,7 +1359,20 @@ class Decompiler:
         self.guarded(self.selection(node, "POINT"), f"fuse({self.value(node, 'Distance')[0]});")
 
     def s_GeometryNodeRealizeInstances(self, node, name, sock, dom):
-        self.emit("realize();")
+        keep = self.inp(node, "Preserve Normals")
+        self.emit("realize(1);" if keep and keep["enabled"] and keep["value"] and not keep["links"] else "realize();")
+
+    def s_GeometryNodePoints(self, node, name, sock, dom):
+        for key in ("Position", "Radius"):
+            s = self.inp(node, key)
+            if s and s["links"]:
+                raise _Unsupported(f"points with a computed {key.lower()}")
+        self.emit(f"points({self.value(node, 'Count', 'int')[0]});")
+
+    def s_GeometryNodeMeshGrid(self, node, name, sock, dom):
+        args = [self.value(node, k, t)[0] for k, t in (("Size X", "float"), ("Size Y", "float"),
+                                                         ("Vertices X", "int"), ("Vertices Y", "int"))]
+        self.emit(f"grid({', '.join(args)});")
 
     def s_GeometryNodeFlipFaces(self, node, name, sock, dom):
         self.guarded(self.selection(node, "FACE"), "flipfaces();")
@@ -1362,7 +1413,11 @@ class Decompiler:
         scale = self.value(node, "Scale")
         if radius != 1.0:
             scale = self.binop(scale, "*", (num(radius), "float", ATOM), MUL, "float")
-        self.emit(f"sweep({scale[0]}, {res});")
+        miter = self.inp(node, "Miter Scale")          # Blender 5.3
+        if miter and miter["enabled"] and (miter["links"] or miter["value"]):
+            self.emit(f"sweep({scale[0]}, {res}, {self.value(node, 'Miter Scale', 'bool')[0]});")
+        else:
+            self.emit(f"sweep({scale[0]}, {res});")
 
     def s_GeometryNodeTransform(self, node, name, sock, dom):
         if self.inp(node, "Mode") and self.inp(node, "Mode")["value"] == "Matrix":

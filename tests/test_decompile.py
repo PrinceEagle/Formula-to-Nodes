@@ -28,13 +28,18 @@ EXTRA = [
     ("sim", 'simulate { @P.z += deltatime * 0.5; }'),
     ("arrays", 'float vals[] = {1.5, 2, 3}; f@a = vals[@ptnum % 3] + sum(vals); v@b = vector(rand(@ptnum));'),
     ("detail", 'runover(detail) { f@area = sumof(@area, "prim"); }\nf@frac = @area / detail(0, "f@area");'),
+    ("component", 'int k = @ptnum % 3;\nf@c = v@P[k] + getcomp(v@N, (@ptnum + 1) % 3);'),
+    ("vectors", 'vector dirs[] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};\n@P += dirs[@ptnum % 3] * 0.1;'),
+    ("points", 'points(50);\n@P = set(rand(@ptnum), rand(@ptnum + 1), 0);'),
+    ("grid", 'grid(2, 1, 12, 6);\n@P.z = sin(@P.x * 3) * 0.1;'),
 ]
 
 
 def _cases():
     out = [(f"example:{e[0]}", e[3]) for e in examples.EXAMPLES]
+    # grids (runover(voxel) { } and the volume* operations) aren't converted back to scripts yet
     out += [(f"recipe:{r.key}", r.script) for r in recipes.RECIPES
-            if not r.test.get("inputs") and not r.test.get("prelude")]
+            if not r.test.get("inputs") and not r.test.get("prelude") and r.category not in recipes.VOLUME_CATEGORIES]
     return out + [(f"extra:{k}", s) for k, s in EXTRA]
 
 
