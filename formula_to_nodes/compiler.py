@@ -70,7 +70,7 @@ VOXEL_DENIED_CATEGORIES = ("Topology", "Aggregates", "Effects", "Geometry operat
 
 class Ctx:
     """A geometry chain: the root, or the inside of one zone."""
-    __slots__ = ("parent", "kind", "geo", "mark", "reserved", "removals", "additions", "voxels")
+    __slots__ = ("parent", "kind", "geo", "mark", "reserved", "removals", "additions", "voxels", "rasters")
 
     def __init__(self, parent, kind, geo, mark, reserved=None):
         self.parent, self.kind, self.geo, self.mark = parent, kind, geo, mark
@@ -78,6 +78,7 @@ class Ctx:
         self.removals = {}        # domain → (captured bool field, delete mode)
         self.additions = []       # geometry to join at the end of this chain
         self.voxels = {}          # grid name → (type, value, topology): runover(voxel) writes not stored yet
+        self.rasters = []         # pending rasterize() calls, splatted together in one node
 
 
 class Scope:
@@ -516,9 +517,10 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
         return None
 
     def stmt(self, s):
-        if self.ctx.voxels and (isinstance(s, (SFor, SForeachArr))
-                                or (isinstance(s, SBlock) and s.kind in ("sim", "repeat", "foreach"))):
-            self.flush_voxels(self.ctx)       # zones carry the geometry: store pending grids first
+        if (self.ctx.voxels or self.ctx.rasters) and (
+                isinstance(s, (SFor, SForeachArr)) or (isinstance(s, SBlock) and s.kind in ("sim", "repeat", "foreach",
+                                                                                            "runover"))):
+            self.flush_grids(self.ctx)        # zones carry the geometry: store pending grids first
         if isinstance(s, SDecl):
             self.s_decl(s)
         elif isinstance(s, SAssign):
@@ -1808,6 +1810,11 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
         key = f"param:{name}"
         p = self.params.get(key)
         if p is None:
+            twin = next((q for q in self.params.values() if q.name == short and q.panel != (panel.strip() or None)),
+                        None)
+            if twin is not None:
+                self.note(f"two parameters are called '{short}' (in {twin.panel or 'no panel'} and "
+                          f"{panel.strip() or 'no panel'}) — give them different names so they're easy to tell apart")
             p = IfaceSocket(key, "INPUT", short, t, default, vmin, vmax, explicit,
                             panel=panel.strip() or None, description=description, single=single)
             self.params[key] = p

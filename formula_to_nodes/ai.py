@@ -144,10 +144,15 @@ VOLUMES (OpenVDB grids, like Houdini's Volume Wrangle and VDB nodes)
   volumeproject("vel" [, iterations])   make velocity divergence-free (incompressible smoke/liquid)
   volumesolve("rhs", "out")   Poisson solve ∇²out = rhs        volumeblur("grid", width, iterations)
   volumecurl("vel", "out")  volumedivergence("vel", "out")  volumegrad("grid", "out")
-  rasterize("grid", value, voxelsize [, "cubic"])   points → grid (per-point value; Blender 5.3)
+  rasterize("grid", value, voxelsize|0 [, kernel [, "sum"|"average"]])   points → grid (Blender 5.3).
+    voxelsize 0 = aligned to volumebounds(). Several rasterize() calls with the same size/kernel become
+    ONE Rasterize Points node — splat every channel you need (mass, momentum, weights) together.
   volumefrommesh("grid", voxelsize [, "sdf"|"fog"])   volumetomesh("grid", threshold)
   volumeremove("grid")   keep("volume")  (drop the mesh etc., e.g. after a smoke sim)
-- Read grids anywhere: volumesample(0, "grid", pos), volumesamplev(...), volumegradient(...).
+- Read grids anywhere: volumesample(0, "grid", pos [, "linear"|"cubic"|"nearest"]), volumesamplev(...),
+  volumegradient(...), volumejacobian(0, "vel", pos [, h]) → 3×3 matrix of ∂u/∂x_j (columns).
+- 3×3 matrices on points (4@T): matrix3(c0, c1, c2), matcol(m, j), matmul(a, b), mulvec(m, v),
+  transpose(m), invert(m), ident() — e.g. APIC / flow-map particle methods.
 - A smoke step: inside simulate { }: runover(voxel) { emit, buoyancy into v@vel }, then
   volumeproject("vel"); volumeadvect("vel", "vel", deltatime); volumeadvect("density", "vel", deltatime);
 

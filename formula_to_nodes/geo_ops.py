@@ -86,8 +86,8 @@ class GeoOps:
     # ── deferred effects ───────────────────────────────────────────────────
     def _flush_effects(self, ctx):
         """Store pending voxel writes, apply pending removals, then join pending additions."""
-        if ctx.voxels:
-            self.flush_voxels(ctx)
+        if ctx.voxels or ctx.rasters:
+            self.flush_grids(ctx)
         if ctx.removals:
             for dom, (flag, mode) in list(ctx.removals.items()):
                 d = self.g.add("GeometryNodeDeleteGeometry", {"domain": dom, "mode": mode},

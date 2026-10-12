@@ -168,6 +168,34 @@ class TestVolumeEvaluate(unittest.TestCase):
         self.assertEqual(r.count("mesh"), 0)
         self.assertIsNotNone(r.geo.volume)
 
+    def test_matrices_and_jacobian(self):
+        r = self.H.run("volumebounds({-1,-1,-1}, {1,1,1}, 0.05);\n"
+                       "runover(voxel) { v@vel = set(@P.y, 2 * @P.x + @P.z, 3 * @P.z); }\n"
+                       "matrix A = matrix3({1,2,0}, {0,1,3}, {4,0,1});\nmatrix B = matrix3({0,1,0}, {-1,0,0}, {0,0,2});\n"
+                       "v@ab = mulvec(matmul(A, B), {1,2,3});\nv@a_b = mulvec(A, mulvec(B, {1,2,3}));\n"
+                       "v@atv = mulvec(transpose(A), {1,2,3});\n"
+                       "matrix J = volumejacobian(0, \"vel\", @P * 0.2, 0.05);\n"
+                       "v@j0 = matcol(J, 0); v@j1 = matcol(J, 1); v@j2 = matcol(J, 2);", kind="plane")
+        self.assertTrue(self.H.close(r.attr("ab")[0], r.attr("a_b")[0], 1e-4))
+        self.assertTrue(self.H.close(r.attr("atv")[0], (5, 11, 7), 1e-4))
+        for k, want in (("j0", (0, 2, 0)), ("j1", (1, 0, 0)), ("j2", (0, 1, 3))):
+            self.assertTrue(self.H.close(r.attr(k)[0], want, 1e-3), (k, r.attr(k)[0]))
+
+    @unittest.skipUnless(HAVE_BPY and bpy.app.version >= (5, 3, 0), "Rasterize Points is Blender 5.3+")
+    def test_rasterize_average_and_batching(self):
+        src = ("volumebounds({-1.2,-1.2,-1.2}, {1.2,1.2,1.2}, 0.1);\ntopoints();\n"
+               "rasterize(\"a\", 2.5, 0, \"linear\", \"average\");\n"
+               "rasterize(\"v\", {1, 2, 3}, 0, \"linear\", \"average\");\n"
+               "rasterize(\"n\", 1, 0, \"linear\");\n"
+               "f@a = volumesample(0, \"a\", @P);\nv@v = volumesamplev(0, \"v\", @P);")
+        res = compiler.compile_source(src, target=caps.Target((5, 3, 0)))
+        self.assertEqual(sum(1 for n in res.graph.nodes if n.idname == "GeometryNodeRasterizePoints"), 1)
+        r = self.H.run(src)
+        for a in r.attr("a", "pointcloud"):
+            self.assertAlmostEqual(a, 2.5, delta=0.05)
+        for v in r.attr("v", "pointcloud"):
+            self.assertTrue(self.H.close(v, (1, 2, 3), 0.05))
+
     @unittest.skipUnless(HAVE_BPY and bpy.app.version >= (5, 3, 0), "Rasterize Points is Blender 5.3+")
     def test_rasterize_points(self):
         r = self.H.run('topoints();\nrasterize("density", 1, 0.1, "linear");\n'

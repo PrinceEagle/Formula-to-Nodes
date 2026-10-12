@@ -36,7 +36,7 @@ reg("colorramp", 'colorramp("name", x [, "preset"])',
 FLOAT_RAMP_PRESETS = ("linear", "smooth", "ease_in", "ease_out", "bell", "valley", "spike", "plateau", "steps",
                       "sine", "invert", "falloff", "pulse", "s_curve", "bounce")
 COLOR_RAMP_PRESETS = ("grayscale", "fire", "heat", "rainbow", "viridis", "magma", "terrain", "ice", "ocean", "smoke",
-                      "lava", "sunset", "neon", "plasma", "forest", "pastel")
+                      "lava", "sunset", "neon", "plasma", "forest", "pastel", "pyro", "toxic", "aurora", "copper")
 
 
 class ParamFuncs:

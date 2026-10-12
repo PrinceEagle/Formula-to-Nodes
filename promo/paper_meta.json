@@ -1,0 +1,126 @@
+[
+ {
+  "key": "weta_bubbles",
+  "venue": "Eurographics 2025 · Wētā FX",
+  "headline": "Wētā FX's bubble solver, as one Geometry Nodes script",
+  "paper": "A unified multi-scale method for simulating immersed bubbles",
+  "authors": "Wretborn, Stomakhin & Batty — Wētā FX / University of Waterloo",
+  "render": "weta_bubbles_hero.png",
+  "nodes_shot": "weta_bubbles_nodes.png",
+  "lines": 85,
+  "nodes": 301,
+  "mapping": [
+   [
+    "Massful air particles, P2G (Eq. 29–31)",
+    "Rasterize Points — 4 channels, one pass (5.3)"
+   ],
+   [
+    "Air fraction clamp φ ≤ 1 (Eq. 31)",
+    "runover(voxel) → one Field to Grid"
+   ],
+   [
+    "Implicit drag D = μrπ/V (6 + ρ r|Δu|/2μ) Δu (Eq. 36)",
+    "closed-form root, exact at any Δt"
+   ],
+   [
+    "Surface tension, CSF: σκ∇φ",
+    "Grid Gradient · Grid Divergence"
+   ],
+   [
+    "Mixture pressure projection",
+    "Grid Solve Poisson (5.3)"
+   ],
+   [
+    "MacCormack water advection",
+    "Grid Advect"
+   ],
+   [
+    "r_surfacing = √(3/4)·h merge surface",
+    "Points to SDF · SDF Offset · Grid to Mesh"
+   ]
+  ],
+  "mapping_note": "Every step runs inside one Simulation Zone. No add-on code at render time — just nodes.",
+  "proof": [
+   [
+    "0.224 m/s",
+    "terminal slip of a single bubble in the node sim, vs 0.226 m/s from the paper's drag law (Eq. 36) — within 1%"
+   ],
+   [
+    "0.28 m/s",
+    "upward water flow the bubble stream pumps into the tank: two-way coupling, the water is dragged along"
+   ],
+   [
+    "1 : 1000",
+    "air/water density ratio, stable at the frame step thanks to the exact implicit drag"
+   ]
+  ],
+  "proof_note": "Measured in Blender 5.3 beta · promo/paper_tests.py bubbles_terminal",
+  "excerpt": "float a = mu * @pscale * pi / V;\nfloat k = rho_w * @pscale / (2 * mu);\nvector R = (rho_b - rho_w) * g + rho_b / dt * (v@ub - uw);\nfloat B = rho_b / dt + 6 * a;\nfloat smag = (-B + sqrt(B*B + 4*a*k*length(R))) / (2*a*k);\nv@ub = alive * (uw + normalize(R) * smag);\n\nfloat w = alive * V / cell;\nrasterize(\"phi\", w, 0, \"linear\");\nrasterize(\"K\", w * c, 0, \"linear\");\nrasterize(\"Kub\", v@ub * (w * c), 0, \"linear\");\nrasterize(\"phiub\", v@ub * w, 0, \"linear\");\n\nrunover(voxel) {\n    float phi = min(f@phi, 1);              // Eq. 31\n    vector uwat = (rho_w*v@vel + dt*v@Kub) / (rho_w + dt*f@K);\n    vector uair = f@phi > 1e-6 ? v@phiub / f@phi : uwat;\n    v@vel = lerp(uwat, uair, phi);\n}\nvolumeproject(\"vel\");          // Poisson node\nvolumeadvect(\"vel\", \"vel\", dt);",
+  "nodes_map": "nodemap_weta_bubbles.json",
+  "proof_short": [
+   "bubble slip, ≤1% off theory",
+   "water pumped by the bubbles",
+   "air/water density ratio"
+  ]
+ },
+ {
+  "key": "pfm_smoke",
+  "venue": "SIGGRAPH 2024 · ACM TOG",
+  "headline": "Particle flow maps: smoke that keeps its swirls",
+  "paper": "Eulerian-Lagrangian Fluid Simulation on Particle Flow Maps",
+  "authors": "Zhou, Chen, Deng, Deng, Sun, Wang, Xiong & Zhu — ACM TOG 43(4)",
+  "render": "pfm_smoke_hero.png",
+  "nodes_shot": "pfm_smoke_nodes.png",
+  "lines": 79,
+  "nodes": 307,
+  "mapping": [
+   [
+    "Impulse on the flow map m = Tᵀm₀ (Eq. 15)",
+    "3×3 matrix attributes · Transpose · Transform Direction"
+   ],
+   [
+    "dT/dt = −T∇u",
+    "Cayley step: Invert + Multiply Matrices"
+   ],
+   [
+    "Affine P2G with ∇m (Eq. 17)",
+    "Rasterize Points — 6 channels, one pass (5.3)"
+   ],
+   [
+    "Pressure projection u = m − ∇φ",
+    "Grid Solve Poisson (5.3)"
+   ],
+   [
+    "Velocity gradient ∇u at particles",
+    "Sample Grid ×6, central differences"
+   ],
+   [
+    "Long-range reinitialisation",
+    "per frame + adaptive per-particle when |T − I| grows"
+   ]
+  ],
+  "mapping_note": "Smoke density rides on the particles and is never re-sampled, so it never blurs.",
+  "proof": [
+   [
+    "101% vs 83%",
+    "peak smoke density after 60 frames: carried on flow-map particles vs advected on the grid (MacCormack), same vortex ring, same Poisson solve"
+   ],
+   [
+    "0.97× vs 1.44×",
+    "volume of dense smoke after 60 frames — the grid smears the ring 44% wider, the particles keep its shape"
+   ],
+   [
+    "1 pass",
+    "one Rasterize Points node splats momentum, its gradient, weight and density together"
+   ]
+  ],
+  "proof_note": "Blender 5.3 beta · paper_tests.py smoke_sharpness · kinetic energy kept ≈ grid (0.75 vs 0.74)",
+  "excerpt": "// Eq. 15: impulse on the flow map\nvector m = mulvec(transpose(4@T), v@m0) + v@impulse;\nmatrix G = volumejacobian(0, \"vel\", @P, h);\n\n// Eq. 17 — one Rasterize Points pass for all six channels\nrasterize(\"mS\", m - mulvec(G, @P), 0, \"linear\");\nrasterize(\"G0\", matcol(G, 0), 0, \"linear\");\nrasterize(\"G1\", matcol(G, 1), 0, \"linear\");\nrasterize(\"G2\", matcol(G, 2), 0, \"linear\");\nrasterize(\"W\", 1, 0, \"linear\");\nrasterize(\"dW\", f@density, 0, \"linear\");\nrunover(voxel) {\n    float wsum = max(f@W, 1e-6);\n    v@vel = (v@mS + v@G0*@P.x + v@G1*@P.y + v@G2*@P.z) / wsum;\n}\nvolumeproject(\"vel\");          // Poisson node\n\n// dT/dt = -T grad u, Cayley step\nmatrix J = volumejacobian(0, \"vel\", pm, h);\n4@T = matmul(4@T, matmul(invert(ahead), behind));",
+  "nodes_map": "nodemap_pfm_smoke.json",
+  "proof_short": [
+   "peak smoke kept (grid: 83%)",
+   "dense-smoke spread (grid 1.44×)",
+   "Rasterize pass for 6 channels"
+  ]
+ }
+]

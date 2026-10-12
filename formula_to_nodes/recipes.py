@@ -624,10 +624,11 @@ simulate {
     runover(voxel) {
         // a thin disc that pushes upward for the first few frames
         vector p = @P - {0, 0, height};
-        float disc = smoothstep(radius, radius * 0.85, length(set(p.x, p.y, 0)))
-                   * smoothstep(vs * 2.5, 0, abs(p.z));
+        float r = length(set(p.x, p.y, 0));
+        float disc = smoothstep(radius, radius * 0.85, r) * smoothstep(vs * 2.5, 0, abs(p.z));
         float on = @Frame <= chi("Puff/frames", 8) ? 1 : 0;
-        f@density = max(f@density, disc * on);
+        // smoke only near the rim: that's what rolls up into the ring
+        f@density = max(f@density, disc * on * smoothstep(radius * 0.45, radius * 0.8, r));
         v@vel = lerp(v@vel, {0, 0, chf("Puff/speed", 3)}, disc * on);
     }
     volumeproject("vel");
@@ -668,7 +669,7 @@ keep("volume");
     # ── Liquids ──────────────────────────────────────────────────────────────
     R("shallow_water", "Shallow water (dam break)", "Liquids",
       "A column of water collapses and sloshes around a tank: the shallow-water equations with a "
-      "two-step Lax–Wendroff scheme. No pressure solve — the height IS the solution — and the time "
+      "MacCormack predictor–corrector. No pressure solve — the height IS the solution — and the time "
       "step adapts to the fastest wave, so it can't blow up.",
       """
 int n = chi("resolution", 150, min=16);
@@ -677,9 +678,12 @@ grid(size, size, n, n);
 float dx = size / (n - 1);
 float g = chf("gravity", 9.8);
 
-// fluxes of U = (depth, x momentum, y momentum)
+// U = (depth, x momentum, y momentum) and its fluxes in x and y
 vector fx(vector U; float g) { return set(U.y, U.y * U.y / U.x + 0.5 * g * U.x * U.x, U.y * U.z / U.x); }
 vector fy(vector U; float g) { return set(U.z, U.y * U.z / U.x, U.z * U.z / U.x + 0.5 * g * U.x * U.x); }
+// a wall mirrors the water: same depth, momentum into the wall reversed
+vector mirrorx(vector U) { return set(U.x, -U.y, U.z); }
+vector mirrory(vector U) { return set(U.x, U.y, -U.z); }
 
 simulate {
     init {
@@ -689,31 +693,37 @@ simulate {
     }
     // time step from the fastest wave (CFL), split into as many substeps as needed
     float c = maxof(sqrt(g * v@U.x) + length(set(v@U.y, v@U.z, 0)) / v@U.x);
-    int steps = int(clamp(ceil(deltatime * c / (chf("cfl", 0.7) * dx)), 1, 64));
-    float dt = deltatime / steps;
+    int steps = int(clamp(ceil(deltatime * c / (chf("cfl", 0.5) * dx)), 1, 96));
+    float k = deltatime / steps / dx;
     int ix = @ptnum / n;
     int iy = @ptnum % n;
     repeat(steps) {
-        // 1. half step to the east and north faces (walls mirror the momentum)
+        // predictor: forward differences in x and y together
         vector U = v@U;
-        vector Ue = ix < n - 1 ? point(0, "U", @ptnum + n) : set(U.x, -U.y, U.z);
-        vector Un = iy < n - 1 ? point(0, "U", @ptnum + 1) : set(U.x, U.y, -U.z);
-        v@Ux = (U + Ue) * 0.5 - (fx(Ue, g) - fx(U, g)) * (dt / (2 * dx));
-        v@Uy = (U + Un) * 0.5 - (fy(Un, g) - fy(U, g)) * (dt / (2 * dx));
-        // 2. full step from the face fluxes (the west and south walls only push back)
-        vector wall = set(0, 0.5 * g * U.x * U.x, 0);
-        vector Fw = ix > 0 ? fx(point(0, "Ux", @ptnum - n), g) : wall;
-        vector Gs = iy > 0 ? fy(point(0, "Uy", @ptnum - 1), g) : set(0, 0, wall.y);
-        vector next = U - (fx(v@Ux, g) - Fw) * (dt / dx) - (fy(v@Uy, g) - Gs) * (dt / dx);
-        v@U = set(max(next.x, 0.001), next.y, next.z);
+        vector Ue = ix < n - 1 ? point(0, "U", @ptnum + n) : mirrorx(U);
+        vector Un = iy < n - 1 ? point(0, "U", @ptnum + 1) : mirrory(U);
+        v@Up = U - (fx(Ue, g) - fx(U, g)) * k - (fy(Un, g) - fy(U, g)) * k;
+        // corrector: backward differences of the predicted state, averaged with the old one
+        vector P = v@Up;
+        vector Pw = ix > 0 ? point(0, "Up", @ptnum - n) : mirrorx(P);
+        vector Ps = iy > 0 ? point(0, "Up", @ptnum - 1) : mirrory(P);
+        vector next = (U + P - (fx(P, g) - fx(Pw, g)) * k - (fy(P, g) - fy(Ps, g)) * k) * 0.5;
+        // keep a film of water everywhere and cap the speed of thin, fast spots
+        float h = max(next.x, 0.002);
+        vector q = set(next.y, next.z, 0);
+        q *= min(1, chf("speed_cap", 3) * h / max(length(q), 1e-6));
+        v@U = set(h, q.x, q.y);
+        // a touch of viscosity damps the ripples that trail steep bores
+        v@U = lerp(v@U, blur(v@U, 1), chf("smoothing", 0.05));
     }
-    // a touch of viscosity keeps the bores clean
-    v@U = lerp(v@U, blur(v@U, 1), chf("smoothing", 0.04));
 }
 f@depth = v@U.x;
 f@speed = length(set(v@U.y, v@U.z, 0)) / v@U.x;
 @P.z = f@depth * chf("height_scale", 1);
-@Cd = colorramp("water", fit(f@speed, 0, chf("Color/max_speed", 2), 0, 1), "ocean");
+// deep water dark, crests light, fast water foams
+f@foam = smoothstep(chf("Color/foam_speed", 0.7), chf("Color/foam_speed", 0.7) * 2, f@speed);
+@Cd = lerp(colorramp("water", fit(f@depth, 0.08, 0.45, 0.1, 0.8), "ocean"), {1, 1, 1}, f@foam);
+shadesmooth(1);
 """, tags=("water", "shallow water", "dam break", "waves", "fluid", "simulation"), test={"frames": 3}),
 
     R("bubbles", "Bubbles", "Liquids",
@@ -754,25 +764,112 @@ simulate {
 }
 """, tags=("bubbles", "water", "foam", "particles", "merge", "simulation"), test={"frames": 3}),
 
+    R("ocean_waves", "Ocean waves (Gerstner)", "Liquids",
+      "Six Gerstner waves summed on a grid: sharp crests, round troughs, crests that travel at the right "
+      "speed for their length. Coloured by height with foam on the peaks.",
+      """
+float t = @Time * chf("speed", 1);
+float steep = chf("steepness", 0.45, min=0, max=1);
+vector offset = {0, 0, 0};
+for (int i = 0; i < 6; i++) {
+    float a = i * 2.4 + chf("direction", 0.3);
+    vector dir = set(cos(a), sin(a), 0);
+    float k = 2 * pi / (chf("wavelength", 2) / (1 + i * 0.45));
+    float amp = chf("height", 0.12) / (1 + i * 0.6);
+    float ph = k * (dot(dir, v@P) - sqrt(9.8 / k) * t);
+    offset += set(dir.x * steep * amp * cos(ph), dir.y * steep * amp * cos(ph), amp * sin(ph));
+}
+@P += offset;
+f@foam = smoothstep(chf("Foam/start", 0.12), chf("Foam/full", 0.25), offset.z);
+@Cd = lerp(colorramp("water", fit(offset.z, -0.25, 0.25, 0, 1), "ocean"), {1, 1, 1}, f@foam);
+shadesmooth(1);
+""", tags=("ocean", "waves", "gerstner", "water", "sea"), needs=("a subdivided grid",),
+      test={"kind": "grid"}),
+
+    R("rain_ripples", "Rain on water", "Liquids",
+      "Raindrops keep landing on a pond; each one starts a ring that spreads, crosses the others and fades.",
+      """
+simulate {
+    init { f@h = 0; f@vel = 0; }
+    // new drops every frame, at random points
+    if (rand(@ptnum * 7 + int(@Frame) * 100003) < chf("rain", 0.0015)) {
+        f@h = -chf("drop_depth", 1);
+    }
+    repeat(chi("steps", 3, min=1)) {
+        float lap = blur(f@h, 1) - f@h;
+        f@vel = (f@vel + lap * chf("speed", 1.6)) * (1 - chf("damping", 0.02));
+        f@h += f@vel;
+    }
+}
+@P.z += f@h * chf("height", 0.03);
+@Cd = colorramp("water", fit(f@h, -0.3, 0.3, 0, 1), "ocean");
+""", tags=("rain", "ripples", "pond", "water", "simulation"), needs=("a dense grid",),
+      test={"kind": "grid", "frames": 3}),
+
+    R("whirlpool", "Whirlpool", "Liquids",
+      "A spinning funnel: the surface dips like a free vortex, and a spiral pattern turns around the core.",
+      """
+vector c = chv("center", {0, 0, 0});
+vector d = set(@P.x - c.x, @P.y - c.y, 0);
+float r = length(d);
+float core = chf("core", 0.15, min=0.01);
+@P.z -= chf("depth", 0.6) * core * core / (r * r + core * core);
+float a = atan2(d.y, d.x) + chf("twist", 6) / (r + 0.2) - @Time * chf("spin", 2);
+f@swirl = 0.5 + 0.5 * sin(a * chi("arms", 4));
+@Cd = colorramp("water", fit(f@swirl * smoothstep(1.5, 0, r), 0, 1, 0.3, 1), "ocean");
+""", tags=("whirlpool", "vortex", "maelstrom", "water", "deform"), needs=("a subdivided grid",),
+      test={"kind": "grid"}),
+
+    R("explosion", "Explosion", "Smoke & Fire",
+      "A burst of hot fuel pushed outward in all directions for a few frames, then it burns, rises and "
+      "rolls into a mushroom.",
+      """
+float vs = chf("Domain/voxel_size", 0.04, min=0.01);
+volumebounds(chv("Domain/min", {-1.6, -1.6, 0}), chv("Domain/max", {1.6, 1.6, 3.6}), vs);
+vector c = chv("Burst/center", {0, 0, 0.5});
+float radius = chf("Burst/radius", 0.35, min=0.05);
+simulate {
+    runover(voxel) {
+        float on = @Frame <= chi("Burst/frames", 4) ? 1 : 0;
+        vector d = @P - c;
+        float ball = smoothstep(radius, radius * 0.3, length(d)) * on;
+        f@fuel = max(f@fuel, ball);
+        v@vel += normalize(d + {0, 0, 1e-4}) * ball * chf("Burst/push", 40) * deltatime;
+        float burn = f@fuel * min(chf("burn_rate", 5) * deltatime, 1);
+        f@fuel -= burn;
+        f@temperature = min(f@temperature * (1 - chf("cooling", 1.2) * deltatime) + burn * 5, 2);
+        f@density = f@density * (1 - chf("dissipation", 0.15) * deltatime) + burn * chf("soot", 1.2);
+        v@vel += {0, 0, 1} * f@temperature * chf("buoyancy", 6) * deltatime;
+    }
+    volumeproject("vel");
+    volumeadvect("vel", "vel", deltatime);
+    volumeadvect("fuel", "vel", deltatime);
+    volumeadvect("temperature", "vel", deltatime);
+    volumeadvect("density", "vel", deltatime);
+}
+keep("volume");
+""", tags=("explosion", "fireball", "mushroom", "pyro", "volume", "simulation"),
+      needs=("a Principled Volume material with blackbody intensity",), test={"kind": "plane", "frames": 3}),
+
     # ── Volumes ──────────────────────────────────────────────────────────────
     R("cloud", "Cloud from a mesh", "Volumes",
       "Turns any closed mesh into a cumulus cloud: the inside of the mesh, eroded by billowing noise. "
       "Model the cloud's shape with spheres, then add this.",
       """
 float vs = chf("voxel_size", 0.025, min=0.005);
-float pad = chf("Noise/amount", 0.25);
-volumefrommesh("inside", vs, "fog");
+float pad = chf("Noise/amount", 0.2);
+// signed distance (negative inside), exact out to the noise amount
+volumefrommesh("sdf", vs, "sdf", pad * 2 + vs * 3);
 volumebounds(getbbox_min(0) - pad, getbbox_max(0) + pad, vs);
 runover(voxel) {
-    // signed distance: negative inside the mesh
-    float d = xyzdist(0, @P);
-    float sd = volumesample(0, "inside", @P) > 0.5 ? -d : d;
-    // billows: big round lumps plus fine wisps
-    float billow = abs(fbm(@P, chf("Noise/scale", 2.5), 5, 0.5)) * 2;
-    float edge = chf("softness", 0.05);
-    f@density = smoothstep(edge, -edge, sd + billow * pad - pad * 0.5);
+    float sd = volumesample(0, "sdf", @P);
+    // billows: big round lumps that push out, fine noise that eats into the edge
+    float lumps = fbm(@P, chf("Noise/scale", 2), 4, 0.5);
+    float wisps = fbm(@P, chf("Noise/scale", 2) * 4, 3, 0.5);
+    float edge = chf("softness", 0.04);
+    f@density = smoothstep(edge, -edge, sd - (lumps - 0.45) * pad * 2 + (wisps - 0.5) * pad * 0.6);
 }
-volumeremove("inside");
+volumeremove("sdf");
 keep("volume");
 """, tags=("cloud", "cumulus", "fog", "volume", "vdb"), needs=("a closed mesh",
                                                               "a Principled Volume material"),
@@ -828,6 +925,336 @@ sdfsmooth("wax", chi("melt", 3), 2);
 volumetomesh("wax", 0);
 shadesmooth(1);
 """, tags=("metaballs", "lava lamp", "blobs", "sdf", "volume", "simulation"), test={"frames": 3}),
+
+    R("weta_bubbles", "Immersed bubbles (Wētā FX, EG 2025)", "Liquids",
+      "Wretborn, Stomakhin & Batty, A unified multi-scale method for simulating immersed bubbles "
+      "(Eurographics 2025). Massful air particles two-way coupled to the water: implicit drag (Eq. 36), a "
+      "clamped air fraction, surface tension (CSF) and a mixture projection. Rising bubbles drag the water "
+      "into a plume; crowded bubbles merge into pockets through the r_surfacing surface.",
+      """
+// A unified multi-scale method for simulating immersed bubbles
+// Wretborn, Stomakhin & Batty — Wētā FX / University of Waterloo, Eurographics 2025 (CGF 44:2).
+// Air is a set of massful particles two-way coupled to the water grid. One representation covers
+// every scale: sparse particles are sub-grid bubbles; where they crowd, their volume fraction
+// fills voxels and they act as one resolved pocket. Drag (Eq. 36) is integrated implicitly, so
+// the 1:1000 air/water density ratio stays stable at any time step.
+float h = chf("Tank/voxel_size", 0.015, min=0.003);
+vector lo = chv("Tank/min", {-0.3, -0.3, 0});
+vector hi = chv("Tank/max", {0.3, 0.3, 1});
+volumebounds(lo, hi, h);
+float rho_w = chf("Water/water_density", 1000);
+float mu = chf("Water/viscosity", 0.001);
+float sigma = chf("Water/surface_tension", 0.072);
+float rho_b = chf("Air/air_density", 1.0);
+float rmin = chf("Air/radius_min", 0.002);
+float rmax = chf("Air/radius_max", 0.008);
+vector nozzle = chv("Nozzle/center", {0, 0, 0.04});
+float spread = chf("Nozzle/radius", 0.02);
+float rate = chf("Nozzle/bubbles_per_second", 3000, min=1);
+vector g = {0, 0, -9.81};
+float cell = h * h * h;
+points(chi("Air/particles", 20000, min=1));
+
+int vents = chi("Nozzle/vents", 1, min=1);
+float ring = chf("Nozzle/vent_ring", 0.15);
+float period = chf("Nozzle/puff_period", 0, min=0);       // 0 = steady stream, else bursts ("exhale")
+
+vector spawn(float id; vector nozzle; float spread; float vents; float ring) {
+    float v = id % vents;
+    float va = v / vents * 2 * pi + 0.7;
+    vector c = nozzle + (vents > 1 ? set(cos(va), sin(va), 0) * ring : {0, 0, 0});
+    float a = rand(id * 5 + 1) * 2 * pi;
+    float r = sqrt(rand(id * 5 + 2)) * spread;
+    return c + set(cos(a) * r, sin(a) * r, rand(id * 5 + 3) * spread);
+}
+
+simulate {
+    init {
+        // steady: one bubble every 1/rate s; bursts: a puff of period·rate bubbles every period
+        float n = period > 0 ? period * rate : 1;
+        f@birth = period > 0 ? floor(@ptnum / n) * period + rand(@ptnum * 5 + 6) * period * 0.25 : @ptnum / rate;
+        @P = spawn(@ptnum, nozzle, spread, vents, ring);
+        @pscale = lerp(rmin, rmax, pow(rand(@ptnum * 5 + 4), 2));
+        v@ub = {0, 0, 0};
+    }
+    int substeps = chi("substeps", 3, min=1);
+    float dt = deltatime / substeps;
+    repeat(substeps) {
+        float alive = @Time >= f@birth ? 1 : 0;
+        float V = 4.0 / 3.0 * pi * pow(@pscale, 3);
+        vector uw = volumesamplev(0, "vel", @P, "cubic");
+        // Eq. 36 drag D = a(6 + k|s|)·s, a = μrπ/V, k = ρ_w r / 2μ, solved fully implicitly:
+        // ρ_b (u' − u)/Δt = (ρ_b − ρ_w) g − D(u' − u_w)  ⇒  (ρ_b/Δt + a(6 + k|s|)) s = R,
+        // a quadratic in |s| with a closed-form root — exact at any Δt and density ratio.
+        float a = mu * @pscale * pi / V;
+        float k = rho_w * @pscale / (2 * mu);
+        vector R = (rho_b - rho_w) * g + rho_b / dt * (v@ub - uw);
+        float B = rho_b / dt + 6 * a;
+        float smag = (-B + sqrt(B * B + 4 * a * k * length(R))) / (2 * a * k);
+        float c = a * (6 + k * smag);                         // drag coefficient at the new slip
+        v@ub = alive * (uw + normalize(R) * smag);
+        // path instability (beyond the paper): bubbles over ~1 mm zig-zag in their own wake,
+        // shedding at a Strouhal number of ~0.2 — f = 0.2·|slip| / 2r
+        float zig = 2 * pi * 0.2 * smag / (2 * @pscale) * @Time + rand(@ptnum * 5 + 7) * 6.283;
+        v@ub += set(cos(zig), sin(zig), 0) * smag * chf("Air/zigzag", 0.35) * smoothstep(0.0008, 0.0015, @pscale);
+        // particles → grid in one Rasterize Points pass: air fraction and the drag terms
+        float w = alive * V / cell;
+        rasterize("phi", w, 0, "linear");
+        rasterize("K", w * c, 0, "linear");
+        rasterize("Kub", v@ub * (w * c), 0, "linear");
+        rasterize("phiub", v@ub * w, 0, "linear");
+        // RK1 advection (as in the paper); bubbles that reach the surface pop and are re-emitted
+        @P += v@ub * dt;
+        if (@P.z > hi.z - h || abs(@P.x) > hi.x - h || abs(@P.y) > hi.y - h) {
+            @P = spawn(@ptnum + @Frame * 7919, nozzle, spread, vents, ring);
+            v@ub = {0, 0, 0};
+        }
+        runover(voxel) {
+            float phi = min(f@phi, 1);                       // Eq. 31 clamp
+            // implicit drag on the water: what the bubbles gained, the water loses (Eq. 36 reaction)
+            vector uwat = (rho_w * v@vel + dt * v@Kub) / (rho_w + dt * f@K);
+            // mixture velocity: air and water share one incompressible field
+            vector uair = f@phi > 1e-6 ? v@phiub / f@phi : uwat;
+            v@vel = lerp(uwat, uair, phi);
+            f@air = phi;
+        }
+        // surface tension, continuum surface force: f = σ κ ∇φ with κ = −∇·(∇φ/|∇φ|)
+        volumeblur("air", 1, 1);
+        volumegrad("air", "gair");
+        runover(voxel) { v@nrm = v@gair / max(length(v@gair), 1e-4); }
+        volumedivergence("nrm", "curv");
+        runover(voxel) {
+            float rho = lerp(rho_w, rho_b, f@air);
+            v@vel += v@gair * (-sigma * f@curv * dt / rho);
+        }
+        volumeproject("vel");
+        volumeadvect("vel", "vel", dt);                       // MacCormack, as in the paper
+    }
+}
+// hero surface: the particles' spheres dilated then eroded by r_surfacing = √(3/4)·h, so crowded
+// bubbles merge into smooth pockets while isolated ones stay round
+float rs = sqrt(0.75) * h * chf("Surface/merge", 1);
+volumefrompoints("bubble", chf("Surface/surface_voxel", 0.003, min=0.0005), (@Time >= f@birth ? @pscale : 0) + rs);
+sdfoffset("bubble", -rs);
+volumetomesh("bubble", 0);
+keep("mesh");
+shadesmooth(1);
+""", tags=("bubbles", "weta", "two-way coupling", "drag", "surface tension", "paper", "simulation"),
+      needs=("a glass/water material with IOR 0.75 (air inside water)",), test={"kind": "plane", "frames": 2},
+      blender=(5, 3, 0)),
+
+    R("pfm_smoke", "Particle flow map smoke (SIGGRAPH 2024)", "Smoke & Fire",
+      "Zhou et al., Eulerian-Lagrangian Fluid Simulation on Particle Flow Maps (ACM TOG 2024). Particles "
+      "carry the flow-map Jacobian and an impulse m = Tᵀm₀, so vortices are transported instead of being "
+      "re-sampled — they live far longer than with grid advection, and the smoke never blurs.",
+      """
+// Particle Flow Maps — Zhou, Chen, Deng, Deng, Sun, Wang, Xiong & Zhu, ACM TOG 43(4), SIGGRAPH 2024.
+// Every particle carries the Jacobian T of the backward flow map and an impulse: m = Tᵀ·m₀.
+// Vorticity is transported along the flow instead of being re-sampled every step, so swirls
+// survive far longer than with grid advection. Smoke density rides on the particles: no blur.
+float h = chf("Domain/voxel_size", 0.04, min=0.005);
+vector lo = chv("Domain/min", {-1, -1, 0});
+vector hi = chv("Domain/max", {1, 1, 3});
+volumebounds(lo, hi, h);
+vector cells = vceil((hi - lo) / h);
+int ppc = chi("Particles/per_voxel", 2, min=1);
+points(int(cells.x * cells.y * cells.z) * ppc);
+int reinit = chi("Flow map/reinit_frames", 1, min=1);
+vector src = chv("Source/center", {0, 0, 0.35});
+float radius = chf("Source/radius", 0.25, min=0.01);
+
+// uniform redistribution: each particle's jittered home cell
+vector home(float id; float ppc; vector cells; vector lo; float h) {
+    float c = floor(id / ppc);
+    float i = c % cells.x;
+    float j = floor(c / cells.x) % cells.y;
+    float k = floor(c / (cells.x * cells.y));
+    return lo + (set(i, j, k) - 0.5 + set(rand(id * 3 + 1), rand(id * 3 + 2), rand(id * 3 + 3))) * h;
+}
+
+simulate {
+    init {
+        @P = home(@ptnum, ppc, cells, lo, h);
+        4@T = ident();
+        // optional starting pushes through discs: each impulse rolls up into a vortex ring.
+        // Two rings one behind the other leapfrog — the classic test of vortex preservation.
+        float R = chf("Ring/ring_radius", 0.35);
+        float push = 0;
+        float smoke = 0;
+        for (int k = 0; k < 2; k++) {
+            vector q = @P - chv("Ring/ring_center", {0, 0, 0.4}) - set(0, 0, k * chf("Ring/spacing", 0.35));
+            float on = k < chi("Ring/rings", 1) ? 1 : 0;
+            float rr = length(set(q.x, q.y, 0));
+            push += on * smoothstep(R, R * 0.85, rr) * smoothstep(0.08, 0, abs(q.z));
+            smoke += on * smoothstep(chf("Ring/smoke_core", 0.09), 0, length(set(rr - R, q.z, 0)));
+        }
+        v@m0 = {0, 0, 1} * chf("Ring/ring_speed", 0) * push;
+        v@impulse = {0, 0, 0};
+        f@density = min(smoke, 1) * (chf("Ring/ring_speed", 0) > 0 ? 1 : 0);
+    }
+    // long-range reinitialisation: fresh map, impulse read back from the grid (G2P). Particles stay
+    // where the flow took them (the flow is divergence-free, so they stay evenly spread) and keep
+    // their smoke: the density is never re-sampled, so it never blurs. Optional uniform
+    // redistribution (as in the paper) trades that sharpness for perfectly even sampling.
+    if (@Frame > 1 && int(@Frame) % reinit == 0) {
+        if (chi("Particles/redistribute", 0) == 1) {
+            @P = home(@ptnum, ppc, cells, lo, h);
+            f@density = volumesample(0, "density", @P, "linear");
+        }
+        v@m0 = volumesamplev(0, "vel", @P, "linear");
+        4@T = ident();
+        v@impulse = {0, 0, 0};
+    }
+    int substeps = chi("substeps", 3, min=1);
+    float dt = deltatime / substeps;
+    repeat(substeps) {
+        // emit smoke; buoyancy adds to the impulse directly
+        float puff = smoothstep(radius, radius * 0.5, length(@P - src))
+                   * fit(noise(@P * 4 + {0, 0, -2} * @Time), 0.3, 0.7, 0, 1);
+        f@density = max(f@density, puff);
+        v@impulse += {0, 0, 1} * f@density * chf("buoyancy", 4) * dt;
+        // impulse carried by the long-range flow map: m = Tᵀ m₀ (Eq. 15). Its gradient uses the
+        // short-range map with n^S = 1 (the paper's 3D setting): ∇m from the grid each step (Eq. 19)
+        vector m = mulvec(transpose(4@T), v@m0) + v@impulse;
+        matrix Gm = volumejacobian(0, "vel", @P, h);
+        float affine = chf("Flow map/affine_gradient", 1, min=0, max=1);
+        matrix G = matrix3(matcol(Gm, 0) * affine, matcol(Gm, 1) * affine, matcol(Gm, 2) * affine);
+        // particles → grid, affine like APIC (Eq. 17): m_i = Σw (m_p + ∇m_p (x_i − x_p)) / Σw.
+        // Split as (Σw(m_p − ∇m_p x_p) + (Σw ∇m_p) x_i) / Σw, so ONE Blender 5.3 Rasterize Points pass
+        // (aligned to the voxels) carries every channel, and the voxel step finishes the sum.
+        rasterize("mS", m - mulvec(G, @P), 0, "linear");
+        rasterize("G0", matcol(G, 0), 0, "linear");
+        rasterize("G1", matcol(G, 1), 0, "linear");
+        rasterize("G2", matcol(G, 2), 0, "linear");
+        rasterize("W", 1, 0, "linear");
+        rasterize("dW", f@density, 0, "linear");
+        runover(voxel) {
+            float wsum = max(f@W, 1e-6);
+            v@vel = (v@mS + v@G0 * @P.x + v@G1 * @P.y + v@G2 * @P.z) / wsum;
+            f@density = f@dW / wsum;
+        }
+        volumeproject("vel");                       // u = m − ∇φ with the 5.3 Poisson Solver
+        // move the particles and evolve the map: dT/dt = −T·∇u with the midpoint velocity gradient.
+        // Cayley step C = (I + ¼·½Δt∇u)⁻¹ (I − ¼·½Δt∇u), squared twice (scaling and squaring):
+        // second order, and (I + …) stays far from singular even in the sharp strain of a ring core
+        vector pm = @P + volumesamplev(0, "vel", @P) * (dt * 0.5);
+        matrix J = volumejacobian(0, "vel", pm, h);
+        vector j0 = matcol(J, 0) * (0.125 * dt);
+        vector j1 = matcol(J, 1) * (0.125 * dt);
+        vector j2 = matcol(J, 2) * (0.125 * dt);
+        matrix ahead = matrix3({1, 0, 0} + j0, {0, 1, 0} + j1, {0, 0, 1} + j2);
+        matrix behind = matrix3({1, 0, 0} - j0, {0, 1, 0} - j1, {0, 0, 1} - j2);
+        matrix C = matmul(invert(ahead), behind);
+        matrix C2 = matmul(C, C);
+        4@T = matmul(4@T, matmul(C2, C2));
+        @P = clamp(@P + volumesamplev(0, "vel", pm) * dt, lo, hi);
+        // adaptive per-particle reinitialisation: a map stretched too far (|T − I| large) is restarted
+        // from the projected grid velocity, so strong shear never amplifies particle noise
+        float stretch = length(matcol(4@T, 0) - {1, 0, 0}) + length(matcol(4@T, 1) - {0, 1, 0})
+                      + length(matcol(4@T, 2) - {0, 0, 1});
+        if (stretch > chf("Flow map/max_stretch", 1.5, min=0.05)) {
+            v@m0 = volumesamplev(0, "vel", @P, "linear");
+            4@T = ident();
+            v@impulse = {0, 0, 0};
+        }
+    }
+}
+keep("volume");
+""", tags=("particle flow map", "impulse", "vortex", "smoke", "siggraph", "paper", "simulation"),
+      needs=("a Principled Volume material",), test={"kind": "plane", "frames": 2}, blender=(5, 3, 0)),
+
+    R("ground_fog", "Ground fog", "Volumes",
+      "A layer of drifting fog over the object's area — thick at the ground, thinning with height, "
+      "broken up by slow noise.",
+      """
+float vs = chf("voxel_size", 0.05, min=0.01);
+float top = chf("height", 0.8);
+volumebounds(getbbox_min(0) - {0.5, 0.5, 0}, set(getbbox_max(0).x + 0.5, getbbox_max(0).y + 0.5, getbbox_min(0).z + top), vs);
+runover(voxel) {
+    float h = (@P.z - getbbox_min(0).z) / top;
+    float n = fbm(@P + set(@Time * chf("drift", 0.1), 0, 0), chf("scale", 1.5), 4, 0.55);
+    f@density = smoothstep(1, 0, h) * smoothstep(0.35, 0.65, n) * chf("density", 1);
+}
+keep("volume");
+""", tags=("fog", "mist", "atmosphere", "volume"), needs=("a Principled Volume material",)),
+
+    R("smooth_union", "Smooth union (blobby merge)", "Volumes",
+      "Joins the 'Input 1' object to this one and melts them together where they meet — like a smooth "
+      "boolean union in an SDF modeller.",
+      """
+join(1);
+float vs = chf("voxel_size", 0.02, min=0.004);
+volumefrommesh("sdf", vs);
+sdfsmooth("sdf", chi("blend", 4, min=1), 2);
+volumetomesh("sdf", 0);
+shadesmooth(1);
+""", tags=("sdf", "boolean", "union", "blend", "melt", "remesh"), needs=("Input 1: the object to merge",),
+      test={"inputs": {"Input 1": "cube"}}),
+
+    R("remesh_smooth", "Voxel remesh", "Volumes",
+      "Rebuilds the mesh from a distance grid: clean even topology, closed holes, optional rounding and "
+      "growing or shrinking.",
+      """
+float vs = chf("voxel_size", 0.03, min=0.004);
+volumefrommesh("sdf", vs);
+sdfoffset("sdf", chf("offset", 0));
+sdffillet("sdf", chi("fillet", 0, min=0));
+volumetomesh("sdf", 0, chf("adaptivity", 0, min=0, max=1));
+shadesmooth(1);
+""", tags=("remesh", "voxel", "sdf", "clean", "topology")),
+
+    R("phyllotaxis", "Phyllotaxis (sunflower)", "Scatter & Instance",
+      "Points on the golden-angle spiral, like sunflower seeds or a pine cone — instance anything on them.",
+      """
+points(chi("count", 800, min=1));
+float a = @ptnum * radians(chf("angle", 137.508));
+float r = chf("spacing", 0.03) * sqrt(@ptnum);
+@P = set(cos(a) * r, sin(a) * r, -chf("dome", 0.3) * r * r);
+@pscale = chf("size", 0.02) * fit(@ptnum, 0, chi("count", 800), 0.5, 1.2);
+p@orient = quaternion(a, {0, 0, 1});
+""", tags=("phyllotaxis", "golden angle", "sunflower", "spiral", "points")),
+
+    R("fibonacci_sphere", "Even points on a sphere", "Scatter & Instance",
+      "Any number of almost perfectly evenly spaced points on a sphere (the Fibonacci lattice).",
+      """
+int n = chi("count", 500, min=1);
+points(n);
+float z = 1 - 2 * (@ptnum + 0.5) / n;
+float a = @ptnum * pi * (3 - sqrt(5));
+float r = sqrt(1 - z * z);
+@P = set(cos(a) * r, sin(a) * r, z) * chf("radius", 1);
+v@N = normalize(v@P);
+@pscale = chf("size", 0.03);
+""", tags=("fibonacci", "sphere", "even", "points", "lattice")),
+
+    R("flag_wave", "Waving flag", "Deformers",
+      "Waves travel along the flag from the pole and grow toward the free edge.",
+      """
+float u = relbbox(0, v@P).x;
+float w = sin(@P.x * chf("frequency", 6) - @Time * chf("speed", 5)) * 0.6
+        + sin(@P.y * 3 + @P.x * 2.3 - @Time * chf("speed", 5) * 0.7) * 0.4;
+@P.z += w * chf("amplitude", 0.12) * pow(u, 1.5);
+""", tags=("flag", "cloth", "wave", "wind", "deform"), needs=("a subdivided plane",), test={"kind": "grid"}),
+
+    R("magnet", "Magnet", "Deformers",
+      "Points near the 'Magnet' object are pulled toward it, with a smooth falloff.",
+      """
+vector m = objpos(chobj("Magnet"));
+float d = distance(v@P, m);
+float pull = smoothstep(chf("radius", 1), 0, d) * chf("strength", 0.6);
+@P = lerp(v@P, m, clamp(pull, 0, 1));
+""", tags=("magnet", "attract", "pull", "deform", "falloff"), needs=("Magnet: an object or empty",),
+      test={"inputs": {"Magnet": "cube"}}),
+
+    R("puddles", "Puddle mask", "Masks",
+      "Water collects in the low, flat parts: 1 in puddles, 0 on bumps and slopes, with noisy edges.",
+      """
+float low = 1 - relbbox(0, v@P).z;
+float flat = smoothstep(0.85, 0.98, dot(normalize(v@N), {0, 0, 1}));
+float n = fbm(v@P, chf("scale", 3), 4, 0.5);
+f@puddle = smoothstep(chf("level", 0.6), chf("level", 0.6) + 0.05, low * flat + (n - 0.5) * chf("breakup", 0.4));
+""", tags=("puddles", "water", "wet", "mask", "rain")),
+
 ]
 
 BY_KEY = {r.key: r for r in RECIPES}

@@ -62,9 +62,10 @@ reg("raypos", "raypos(geo, orig, dir)", "hit position (orig + dir when it misses
     out="Hit Position")
 reg("raynormal", "raynormal(geo, orig, dir)", "surface normal at the hit", "Sampling", "f_ray", out="Hit Normal")
 reg("raydist", "raydist(geo, orig, dir)", "distance to the hit", "Sampling", "f_ray", out="Hit Distance")
-reg("volumesample", 'volumesample(geo, "grid", pos)', "float volume grid value at pos", "Sampling",
+reg("volumesample", 'volumesample(geo, "grid", pos [, "cubic"])',
+    "float volume grid value at pos (interpolation: linear, quadratic, cubic, nearest)", "Sampling",
     "f_volumesample", t=FLOAT)
-reg("volumesamplev", 'volumesamplev(geo, "grid", pos)', "vector volume grid value at pos", "Sampling",
+reg("volumesamplev", 'volumesamplev(geo, "grid", pos [, "cubic"])', "vector volume grid value at pos", "Sampling",
     "f_volumesample", t=VECTOR)
 reg("volumegradient", 'volumegradient(geo, "grid", pos)', "gradient of a float grid at pos", "Sampling",
     "f_volumegradient")
@@ -502,20 +503,34 @@ class GeoFuncs:
         return n.out("Grid")
 
     def f_volumesample(self, node, name):
-        if len(node.args) != 3:
-            raise FormulaError(f'{name}() takes {name}(geo, "grid", pos)')
+        if len(node.args) not in (3, 4):
+            raise FormulaError(f'{name}() takes {name}(geo, "grid", pos [, "cubic"])')
         t = FUNCS[name].data["t"]
+        if self.ctx.rasters or self.ctx.voxels:
+            self.flush_grids(self.ctx)       # read what was just splatted / written
         geo, _ = self.geo_arg(node.args[0], name)
         gname = self.str_const(node.args[1], f"{name}()'s grid name")
         pos = self.coerce(self.expr(node.args[2]), VECTOR, f"{name}()'s position")
         grid = self._grid(geo, gname, t)
-        n = self.g.add("GeometryNodeSampleGrid", {"data_type": SOCKET_DTYPE[t]},
-                       {"Grid": grid, "Position": self.inp(pos, VECTOR)})
+        inputs = {"Grid": grid, "Position": self.inp(pos, VECTOR)}
+        if len(node.args) == 4:
+            word = self.str_const(node.args[3], f"{name}()'s interpolation").strip().lower()
+            modes = {"linear": "Trilinear", "trilinear": "Trilinear", "quadratic": "Triquadratic",
+                     "cubic": "Tricubic", "tricubic": "Tricubic", "nearest": "Nearest Neighbor"}
+            if word not in modes:
+                raise FormulaError(f"{name}(): interpolation is linear, quadratic, cubic or nearest")
+            if modes[word] == "Tricubic" and not self.target.supports("cubic_sampling"):
+                self.note(f"{name}(): tricubic sampling is new in Blender 5.3 — using triquadratic here")
+                modes[word] = "Triquadratic"
+            inputs["Interpolation"] = modes[word]
+        n = self.g.add("GeometryNodeSampleGrid", {"data_type": SOCKET_DTYPE[t]}, inputs)
         return Val(t, o=n.out("Value"), field=pos.field)
 
     def f_volumegradient(self, node, name):
         if len(node.args) != 3:
             raise FormulaError('volumegradient() takes volumegradient(geo, "grid", pos)')
+        if self.ctx.rasters or self.ctx.voxels:
+            self.flush_grids(self.ctx)
         geo, _ = self.geo_arg(node.args[0], name)
         gname = self.str_const(node.args[1], "volumegradient()'s grid name")
         pos = self.coerce(self.expr(node.args[2]), VECTOR, "volumegradient()'s position")

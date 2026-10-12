@@ -17,6 +17,21 @@ Volumes, real fluid solvers and the new Blender 5.3 nodes. Still works on 5.2 (f
   `sdfsmooth`, `sdfoffset`, `sdffillet`, `sdfboolean`.
 - `keep("volume")` (or mesh/points/curves/instances) drops the other geometry types.
 
+## Research papers, implemented as recipes (Blender 5.3)
+- **Immersed bubbles** — Wretborn, Stomakhin & Batty (Wētā FX / Waterloo), *A unified multi-scale
+  method for simulating immersed bubbles*, Eurographics 2025. Massful air particles two-way coupled
+  to the water grid: P2G of the air fraction and drag terms in one Rasterize Points pass, the φ ≤ 1
+  clamp (Eq. 31), Eq. 36 drag solved in closed form (exact at any time step, 1:1000 density ratio),
+  CSF surface tension, mixture projection with the Poisson Solver, MacCormack water, and the
+  r_surfacing merge surface. A single bubble's terminal slip matches the drag law within 1%.
+- **Particle flow maps** — Zhou et al., *Eulerian-Lagrangian Fluid Simulation on Particle Flow
+  Maps*, ACM TOG / SIGGRAPH 2024. Particles carry the flow-map Jacobian T and the impulse m = Tᵀm₀,
+  affine P2G (Eq. 17) in one Rasterize Points pass, Cayley update of T (scaled and squared),
+  per-frame plus adaptive per-particle reinitialisation. Smoke density stays on the particles.
+- New functions: `volumejacobian()`, `matrix3()`, `matcol()`, `matmul()`, `mulvec()`;
+  `rasterize(..., 0, kernel, "average")` aligned to `volumebounds()` and batched into one node;
+  `volumesample(..., "linear"|"cubic"|"nearest")` (cubic = 5.3 Tricubic).
+
 ## Blender 5.3 nodes
 - Array literals use **Combine List** (one node instead of Field to List + Index Switch).
 - `v[i]` / `getcomp()` with a variable index use **Get Vector Component**.

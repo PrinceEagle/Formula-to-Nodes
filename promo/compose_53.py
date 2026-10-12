@@ -45,16 +45,23 @@ SHOTS = {
                     "Blender 5.3's Poisson Solver keeps it incompressible in a single node."),
     "fire": ("Fire from a formula", "Fuel → heat + soot, rendered as blackbody",
              "Fuel pours from a disc and burns; the heat lifts the flames and cools into smoke."),
-    "smoke_ring": ("A vortex ring, no tricks", "One push, the solver does the rest",
+    "smoke_ring": ("One push → a vortex ring", "No buoyancy, no keyframes",
                    "No buoyancy, no keyframes: a short push through a disc rolls up into a travelling ring."),
     "bubbles": ("Bubbles that merge and pop", "Particles with real rules",
                 "Bigger bubbles rise faster, spiral, swallow their neighbours and pop at the surface."),
-    "shallow_water": ("Dam break in 30 lines", "Shallow-water equations, CFL-safe",
-                      "Lax–Wendroff on a grid, with substeps derived from the fastest wave so it can't blow up."),
+    "shallow_water": ("Dam break, one script", "Shallow-water equations, CFL-safe",
+                      "MacCormack predictor–corrector on a grid, with substeps derived from the fastest wave "
+                      "so it can't blow up."),
     "galaxy": ("A galaxy from points", "Blender 5.3 Rasterize Points",
                "20,000 points in spiral arms, splatted into glowing dust — colour included."),
     "lava_lamp": ("Lava lamp metaballs", "Points → SDF → smooth → mesh",
                   "Blobs heat, rise, cool and sink; their spheres melt together through a smoothed distance grid."),
+    "ocean_waves": ("Open ocean in one loop", "Six Gerstner waves, summed",
+                    "Sharp crests, round troughs and the right speed for every wavelength — foam where they peak."),
+    "ocean_waves": ("An ocean in one loop", "Six Gerstner waves, no simulation",
+                    "Sharp crests, round troughs and waves that travel at the right speed for their length."),
+    "whirlpool": ("Whirlpool", "A free vortex in a few lines",
+                  "The surface dips like a real vortex and a spiral pattern turns around the core."),
     "cloud": ("Any mesh → a cloud", "Distance field + billowing noise",
               "Model the shape with a few spheres; the script erodes it into a cumulus."),
 }
@@ -121,11 +128,13 @@ def stats_text(meta):
     out = []
     if meta.get("nodes"):
         out.append(f"{meta['nodes']} nodes")
-    if meta.get("fps") and meta.get("fps") < 1000:
-        out.append(f"{meta['fps']:.0f} fps live")
     if meta.get("voxels"):
         out.append(f"{meta['voxels'] / 1000:.0f}k voxels")
-    out.append("Blender 5.3")
+    fps = meta.get("fps")
+    if fps and fps < 1000:
+        out.append(f"{fps:.1f} fps simulated" if fps < 10 else f"{fps:.0f} fps simulated")
+    v = meta.get("blender", "")
+    out.append("Blender " + (v.replace(" LTS", "").replace(" Beta", " beta") if v else "5.3"))
     return out
 
 
@@ -133,31 +142,32 @@ def insta(shot, meta, render, nodes, out):
     W, H = 1080, 1350
     title, sub, _ = SHOTS[shot]
     img = Image.new("RGB", (W, H), BG)
-    hero = fit(render, W, 860)
-    img.paste(hero, (0, 0))
-    fade = Image.new("L", (1, 220))
-    for y in range(220):
-        fade.putpixel((0, y), int(255 * (y / 219) ** 1.6))
-    img.paste(Image.new("RGB", (W, 220), BG), (0, 640), fade.resize((W, 220)))
+    hero = 800 if nodes is not None else 1036
+    img.paste(fit(render, W, hero), (0, 0))
+    fade = Image.new("L", (1, 240))
+    for y in range(240):
+        fade.putpixel((0, y), int(255 * (y / 239) ** 1.6))
+    img.paste(Image.new("RGB", (W, 240), BG), (0, hero - 240), fade.resize((W, 240)))
+    ty = 640 if nodes is not None else 876
+    top = Image.new("L", (1, 170))
+    for y in range(170):
+        top.putpixel((0, y), int(200 * (1 - y / 169) ** 1.4))
+    img.paste(Image.new("RGB", (W, 170), BG), (0, 0), top.resize((W, 170)))
     d = ImageDraw.Draw(img)
-    d.text((56, 52), "Formula to Nodes", font=_font(BOLD, 30), fill=FG)
-    d.text((56, 92), "3.1 · for Blender 5.3", font=_font(SANS, 22), fill=DIM)
-    d.text((56, 700), title, font=_font(BOLD, 58), fill=FG)
-    d.text((58, 774), sub, font=_font(SANS, 28), fill=DIM)
-    # code + nodes row
-    y0 = 840
-    card = Image.new("RGB", (560, 470), PANEL)
-    cd = ImageDraw.Draw(card)
-    draw_code(cd, 22, 20, meta["script"], size=13, max_lines=26, lh=17)
-    img.paste(rounded(card), (40, y0), rounded(card))
+    d.text((48, 44), "Formula to Nodes", font=_font(BOLD, 30), fill=FG)
+    d.text((48, 84), "3.1 · for Blender 5.3", font=_font(SANS, 22), fill=DIM)
+    d.text((48, ty), title, font=_font(BOLD, 56), fill=FG)
+    d.text((50, ty + 72), sub, font=_font(SANS, 27), fill=DIM)
+    # the node tree the script built (Blender screenshot) and the first lines of the script
     if nodes is not None:
-        nimg = fit(nodes, 420, 470)
-        img.paste(rounded(nimg), (620, y0), rounded(nimg))
-    x = 40
-    f = _font(BOLD, 20)
-    for s in stats_text(meta):
-        x = badge(d, x, H - 30 - 40 - 0, s, f) if False else x
-    d.text((40, H - 34), "  ·  ".join(stats_text(meta)), font=_font(SANS, 20), fill=DIM)
+        nimg = panel_image(nodes, 984, 250)
+        img.paste(rounded(nimg, 18), (48, 772), rounded(nimg, 18))
+        d.text((64, 782), "the node tree it built", font=_font(SANS, 16), fill=DIM)
+    card = Image.new("RGB", (984, 238), PANEL)
+    lines = [l for l in meta["script"].strip().splitlines() if l.strip() and not l.strip().startswith("//")]
+    draw_code(ImageDraw.Draw(card), 22, 16, "\n".join(lines[:11]), size=14, max_lines=11, lh=19)
+    img.paste(rounded(card, 18), (48, 1036), rounded(card, 18))
+    d.text((48, H - 44), "  ·  ".join(stats_text(meta)), font=_font(SANS, 21), fill=DIM)
     path = os.path.join(out, f"{shot}_insta.png")
     img.save(path, quality=95)
     return path
@@ -172,6 +182,10 @@ def story(shot, meta, render, nodes, out):
     for y in range(260):
         fade.putpixel((0, y), int(255 * (y / 259) ** 1.5))
     img.paste(Image.new("RGB", (W, 260), BG), (0, 920), fade.resize((W, 260)))
+    top = Image.new("L", (1, 220))
+    for y in range(220):
+        top.putpixel((0, y), int(200 * (1 - y / 219) ** 1.4))
+    img.paste(Image.new("RGB", (W, 220), BG), (0, 0), top.resize((W, 220)))
     d = ImageDraw.Draw(img)
     d.text((64, 80), "Formula to Nodes 3.1", font=_font(BOLD, 34), fill=FG)
     d.text((64, 1010), title, font=_font(BOLD, 64), fill=FG)
@@ -202,12 +216,64 @@ def web(shot, meta, render, nodes, out):
     draw_code(ImageDraw.Draw(card), 22, 20, meta["script"], size=12, max_lines=60, lh=15)
     img.paste(rounded(card), (70, y + 24), rounded(card))
     if nodes is not None:
-        nimg = fit(nodes, 500, H - y - 110, mode="cover")
+        nimg = panel_image(nodes, 500, H - y - 110)
         img.paste(rounded(nimg), (590, y + 24), rounded(nimg))
     d.text((70, H - 62), "  ·  ".join(stats_text(meta)), font=_font(SANS, 22), fill=DIM)
     path = os.path.join(out, f"{shot}_web.png")
     img.save(path, quality=95)
     return path
+
+
+def editor_crop(folder, shot, kind):
+    """Crop the node editor (or 3D viewport) out of a full-window Blender screenshot,
+    using the region rectangles live_promo.shoot_window() saved next to it."""
+    img_p = os.path.join(folder, f"{shot}_{kind}.png")
+    meta_p = os.path.splitext(img_p)[0] + ".areas.json"
+    if not (os.path.exists(img_p) and os.path.exists(meta_p)):
+        return None
+    img = Image.open(img_p).convert("RGB")
+    meta = json.load(open(meta_p))
+    ww, wh = meta["window"]
+    sx, sy = img.width / ww, img.height / wh
+    want = "GeometryNodeTree"
+    area = max((a for a in meta["areas"] if a["type"] == want), key=lambda a: a["w"] * a["h"], default=None)
+    if area is None:
+        return img
+    reg = next((r for r in area["regions"] if r["type"] == "WINDOW"), area)
+    # region coords are bottom-left based, in pixels (already Retina-scaled when > window size)
+    k = 1.0 if area["w"] > ww else sx
+    x0, y0, w, h = reg["x"] * k, reg["y"] * k, reg["w"] * k, reg["h"] * k
+    ui = next((r for r in area["regions"] if r["type"] == "UI" and r["w"] > 1), None)
+    if ui is not None and x0 < ui["x"] * k < x0 + w:          # the sidebar overlaps the editor
+        w = ui["x"] * k - x0
+    top = img.height - (y0 + h)
+    return img.crop((int(x0), int(top), int(x0 + w), int(top + h)))
+
+
+def autocrop(img, pad=40, min_frac=0.02):
+    """Trim the empty editor background around the nodes."""
+    import numpy as np
+    a = np.asarray(img.convert("RGB")).astype(int)
+    bg = np.median(a.reshape(-1, 3), axis=0)
+    busy = (np.abs(a - bg).max(axis=2) > 30)
+    busy[:90] = False                       # the editor's breadcrumb text
+    busy[-40:] = False
+    # rows/columns where nodes are (the dot grid alone is too sparse to count)
+    rows, cols = np.where(busy.mean(axis=1) > 0.006)[0], np.where(busy.mean(axis=0) > 0.006)[0]
+    if len(rows) < img.height * min_frac or len(cols) < img.width * min_frac:
+        return img
+    y0, y1 = max(rows[0] - pad, 0), min(rows[-1] + pad, img.height)
+    x0, x1 = max(cols[0] - pad, 0), min(cols[-1] + pad, img.width)
+    return img.crop((x0, y0, x1, y1))
+
+
+def panel_image(img, w, h, bg=(29, 29, 29)):
+    """Fit a node screenshot into a w×h panel without cutting nodes off."""
+    img = autocrop(img)
+    fitted = fit(img, w, h, mode="contain")
+    out = Image.new("RGB", (w, h), bg)
+    out.paste(fitted, ((w - fitted.width) // 2, (h - fitted.height) // 2))
+    return out
 
 
 def main(folder):
@@ -224,8 +290,7 @@ def main(folder):
         if not render_p or not os.path.exists(os.path.join(folder, os.path.basename(render_p))):
             continue
         render = Image.open(os.path.join(folder, os.path.basename(render_p))).convert("RGB")
-        nodes_p = os.path.join(folder, f"{shot}_nodes.png")
-        nodes = Image.open(nodes_p).convert("RGB") if os.path.exists(nodes_p) else None
+        nodes = editor_crop(folder, shot, "closeup") or editor_crop(folder, shot, "nodes")
         made += [insta(shot, meta, render, nodes, out), story(shot, meta, render, nodes, out),
                  web(shot, meta, render, nodes, out)]
     print("\n".join(made))

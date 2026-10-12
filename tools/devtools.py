@@ -22,6 +22,8 @@ LOGS = os.path.join(ROOT, "promo", "logs")
 
 
 def _blender():
+    if os.environ.get("FTN_BLENDER"):          # e.g. a Blender 5.3 build next to the one you work in
+        return os.environ["FTN_BLENDER"]
     try:
         import bpy
         return bpy.app.binary_path

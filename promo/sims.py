@@ -188,6 +188,30 @@ def mesh_object(sc, kind, name, **kw):
     return ob
 
 
+def material_modifier(ob):
+    """Geometry the nodes create (grid(), points(), volumes...) has no material: give it the object's."""
+    if not getattr(ob.data, "materials", None) or not ob.data.materials[0]:
+        return
+    name = "FTN Set Material"
+    g = bpy.data.node_groups.get(name)
+    if g is None:
+        g = bpy.data.node_groups.new(name, "GeometryNodeTree")
+        g.interface.new_socket("Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+        g.interface.new_socket("Material", in_out="INPUT", socket_type="NodeSocketMaterial")
+        g.interface.new_socket("Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+        gi, go = g.nodes.new("NodeGroupInput"), g.nodes.new("NodeGroupOutput")
+        sm = g.nodes.new("GeometryNodeSetMaterial")
+        g.links.new(gi.outputs["Geometry"], sm.inputs["Geometry"])
+        g.links.new(gi.outputs["Material"], sm.inputs["Material"])
+        g.links.new(sm.outputs["Geometry"], go.inputs[0])
+        gi.location, sm.location, go.location = (-300, 0), (0, 0), (250, 0)
+    mod = ob.modifiers.new("Material", "NODES")
+    mod.node_group = g
+    ident = next(it.identifier for it in g.interface.items_tree
+                 if it.item_type == "SOCKET" and it.in_out == "INPUT" and it.name == "Material")
+    getattr(mod.properties.inputs, ident).value = ob.data.materials[0]
+
+
 def add_recipe(ob, key, params=None, script=None, name=None):
     src = script or recipes.get(key).script
     res = compiler.compile_source(src, target=caps.from_blender(bpy))
@@ -195,9 +219,12 @@ def add_recipe(ob, key, params=None, script=None, name=None):
     mod = ob.modifiers.new(name or key, "NODES")
     mod.node_group = tree
     for k, v in (params or {}).items():
+        panel, _, nm = k.rpartition("/")
         ident = next(it.identifier for it in tree.interface.items_tree
-                     if it.item_type == "SOCKET" and it.in_out == "INPUT" and it.name == k)
+                     if it.item_type == "SOCKET" and it.in_out == "INPUT" and it.name == nm
+                     and (not panel or (it.parent is not None and it.parent.name == panel)))
         getattr(mod.properties.inputs, ident).value = v
+    material_modifier(ob)
     return mod, res, src
 
 
@@ -227,18 +254,17 @@ def render(sc, path, samples=128):
 
 def shot_smoke_plume(args):
     sc = reset()
-    world(sc, (0.006, 0.007, 0.01))
-    floor(sc, color=(0.012, 0.012, 0.014), rough=0.85)
+    world(sc, (0.004, 0.005, 0.007))
     ob = mesh_object(sc, "plane", "Smoke", size=0.1)
-    ob.data.materials.append(volume_material("Smoke", (0.92, 0.92, 0.95), density=args.density, anisotropy=0.45))
-    params = {"max": (1.0, 1.0, 4.5)}
+    ob.data.materials.append(volume_material("Smoke", (0.62, 0.63, 0.66), density=args.density, anisotropy=0.3))
+    params = {"min": (-1.3, -1.3, 0.0), "max": (1.3, 1.3, 5.0)}
     if args.voxel:
         params["voxel_size"] = args.voxel
     mod, res, src = add_recipe(ob, "smoke_plume", params)
-    camera(sc, (0, -8.4, 2.0), (0, 0, 2.05), lens=50)
-    light(sc, "AREA", (4, -2.0, 3.8), (0, 0, 2.0), 1600, (1.0, 0.82, 0.62), size=1.2)      # warm key
-    light(sc, "AREA", (-2.5, 4.0, 3.5), (0, 0, 2.2), 2200, (0.5, 0.68, 1.0), size=2.0)     # cool rim
-    light(sc, "AREA", (-4, -3, 1.5), (0, 0, 1.5), 120, (0.7, 0.75, 0.9), size=4)          # fill
+    camera(sc, (0, -8.8, 1.9), (0, 0, 2.1), lens=45)
+    light(sc, "AREA", (4.5, 0.5, 3.0), (0, 0, 2.2), 2600, (1.0, 0.82, 0.62), size=1.2)      # warm side key
+    light(sc, "AREA", (-2.5, 4.0, 3.5), (0, 0, 2.2), 3500, (0.5, 0.68, 1.0), size=2.0)     # cool rim
+    light(sc, "AREA", (-4, -3, 1.5), (0, 0, 2.2), 30, (0.7, 0.75, 0.9), size=4)           # fill
     return sc, ob, res, src
 
 
@@ -251,7 +277,9 @@ def shot_fire(args):
     pv = next(n for n in m.node_tree.nodes if n.bl_idname == "ShaderNodeVolumePrincipled")
     pv.inputs["Temperature"].default_value = 1400
     ob.data.materials.append(m)
-    params = {"voxel_size": args.voxel} if args.voxel else {}
+    params = {"radius": 0.42, "strength": 5.0}
+    if args.voxel:
+        params["voxel_size"] = args.voxel
     mod, res, src = add_recipe(ob, "fire", params)
     camera(sc, (0, -4.6, 1.15), (0, 0, 1.05), lens=50)
     light(sc, "AREA", (-3, 2.5, 3), (0, 0, 1), 150, (0.5, 0.65, 1.0), size=3)
@@ -261,12 +289,11 @@ def shot_fire(args):
 def shot_smoke_ring(args):
     sc = reset()
     world(sc, (0.005, 0.006, 0.009))
-    floor(sc, color=(0.012, 0.012, 0.014), rough=0.85)
     ob = mesh_object(sc, "plane", "Ring", size=0.1)
     ob.data.materials.append(volume_material("Ring", (0.95, 0.95, 0.97), density=args.density, anisotropy=0.5))
     params = {"voxel_size": args.voxel} if args.voxel else {}
     mod, res, src = add_recipe(ob, "smoke_ring", params)
-    camera(sc, (0, -6.6, 1.0), (0, 0, 1.9), lens=50)
+    camera(sc, (0, -6.0, 0.2), (0, 0, 1.8), lens=50)
     light(sc, "AREA", (3.5, -2.0, 4.5), (0, 0, 2), 1400, (1.0, 0.85, 0.7), size=1.5)
     light(sc, "AREA", (-2.5, 4.0, 3.5), (0, 0, 2.2), 2500, (0.45, 0.65, 1.0), size=2.0)
     return sc, ob, res, src
@@ -274,7 +301,7 @@ def shot_smoke_ring(args):
 
 def shot_bubbles(args):
     sc = reset()
-    world(sc, (0.004, 0.02, 0.04))
+    world(sc, (0.002, 0.01, 0.03))
     ob = mesh_object(sc, "plane", "Bubbles", size=0.1)
     ob.data.materials.append(surface_material("Bubble", (1, 1, 1), rough=0.0, transmission=1.0, ior=0.75))
     params = {"count": 900}
@@ -282,7 +309,7 @@ def shot_bubbles(args):
     # a glowing back panel gives the bubbles bright rims, like a lit aquarium
     back = mesh_object(sc, "plane", "Backlight", size=6)
     back.location, back.rotation_euler = (0, 2.2, 1.0), (math.radians(90), 0, 0)
-    back.data.materials.append(surface_material("Glow", (0, 0, 0), emission=((0.25, 0.6, 1.0), 2.0)))
+    back.data.materials.append(surface_material("Glow", (0, 0, 0), emission=((0.05, 0.3, 0.75), 0.55)))
     camera(sc, (0, -3.3, 1.0), (0, 0, 1.0), lens=50)
     light(sc, "AREA", (0, -1, 3.2), (0, 0, 1), 250, (0.8, 0.9, 1.0), size=2)
     return sc, ob, res, src
@@ -299,32 +326,47 @@ def shot_shallow_water(args):
     nt.links.new(attr.outputs["Color"], nt.nodes["Principled BSDF"].inputs["Base Color"])
     ob.data.materials.append(m)
     mod, res, src = add_recipe(ob, "shallow_water", {})
-    tank = mesh_object(sc, "cube", "Tank", size=1.0)
-    tank.scale = (2.1, 2.1, 0.06)
-    tank.location = (0, 0, -0.03)
-    tank.data.materials.append(surface_material("Tank", (0.05, 0.05, 0.06), rough=0.6))
-    camera(sc, (2.6, -2.6, 2.1), (0, 0, 0.05), lens=42)
-    light(sc, "SUN", (0, 0, 5), (0.5, 0.8, 0), 3.5, (1.0, 0.95, 0.88), size=0.05)
-    light(sc, "AREA", (-3, 2, 3), (0, 0, 0), 600, (0.6, 0.75, 1.0), size=4)
+    tm = surface_material("Tank", (0.03, 0.03, 0.035), rough=0.5)
+    for name, loc, scale in (("Tank floor", (0, 0, -0.03), (2.12, 2.12, 0.06)),
+                             ("Tank wall N", (0, 1.04, 0.2), (2.12, 0.04, 0.5)),
+                             ("Tank wall W", (-1.04, 0, 0.2), (0.04, 2.12, 0.5))):
+        t = mesh_object(sc, "cube", name, size=1.0)
+        t.location, t.scale = loc, scale
+        t.data.materials.append(tm)
+    camera(sc, (2.75, -2.75, 1.55), (-0.05, 0.05, 0.12), lens=40)
+    light(sc, "SUN", (0, 0, 5), (0.6, 0.9, 0), 2.2, (1.0, 0.94, 0.85), size=0.03)
+    light(sc, "AREA", (-3, -1, 2.5), (0, 0, 0), 500, (0.55, 0.75, 1.0), size=4)
     return sc, ob, res, src
 
 
 def shot_galaxy(args):
+    """Stars (points, surface emission) and dust (volume emission) as two objects running the
+    same recipe — one material carrying both a surface and a volume shader renders black in
+    Cycles here."""
     sc = reset()
     world(sc, (0.0, 0.0, 0.0))
-    ob = mesh_object(sc, "plane", "Galaxy", size=0.1)
-    m = bpy.data.materials.new("Galaxy")
+    stars = mesh_object(sc, "plane", "Galaxy", size=0.1)
+    m = bpy.data.materials.new("Stars")
     m.use_nodes = True
     nt = m.node_tree
     for n in list(nt.nodes):
         nt.nodes.remove(n)
     out = nt.nodes.new("ShaderNodeOutputMaterial")
     em = nt.nodes.new("ShaderNodeEmission")
-    em.inputs["Strength"].default_value = 6.0
+    em.inputs["Strength"].default_value = 4.0
     pt = nt.nodes.new("ShaderNodeAttribute")
     pt.attribute_name = "Cd"
     nt.links.new(pt.outputs["Color"], em.inputs["Color"])
     nt.links.new(em.outputs[0], out.inputs["Surface"])
+    stars.data.materials.append(m)
+    mod, res, src = add_recipe(stars, "galaxy", {})
+    dust = mesh_object(sc, "plane", "Galaxy dust", size=0.1)
+    d = bpy.data.materials.new("Dust")
+    d.use_nodes = True
+    nt = d.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
     pv = nt.nodes.new("ShaderNodeVolumePrincipled")
     pv.inputs["Density"].default_value = 0.0
     col = nt.nodes.new("ShaderNodeAttribute")
@@ -334,36 +376,45 @@ def shot_galaxy(args):
     mul = nt.nodes.new("ShaderNodeMath")
     mul.operation = "MULTIPLY"
     mul.inputs[1].default_value = args.density
-    nt.links.new(den.outputs["Fac"], mul.inputs[0])
+    nt.links.new(den.outputs[2], mul.inputs[0])
     nt.links.new(col.outputs["Color"], pv.inputs["Emission Color"])
     nt.links.new(mul.outputs[0], pv.inputs["Emission Strength"])
     nt.links.new(pv.outputs["Volume"], out.inputs["Volume"])
-    ob.data.materials.append(m)
-    mod, res, src = add_recipe(ob, "galaxy", {})
+    dust.data.materials.append(d)
+    add_recipe(dust, "galaxy", {})
+    add_recipe(dust, None, script='keep("volume");', name="dust only")
     camera(sc, (0, -3.0, 2.0), (0, 0, -0.05), lens=40)
-    return sc, ob, res, src
+    return sc, stars, res, src
 
 
 def shot_lava_lamp(args):
     sc = reset()
-    world(sc, (0.02, 0.005, 0.03))
-    floor(sc, color=(0.02, 0.015, 0.02), rough=0.4)
+    world(sc, (0.012, 0.002, 0.02))
+    floor(sc, color=(0.015, 0.01, 0.015), rough=0.35)
     ob = mesh_object(sc, "plane", "Lava", size=0.1)
-    m = surface_material("Wax", (1.0, 0.25, 0.05), rough=0.25, emission=((1.0, 0.3, 0.05), 0.6))
+    m = surface_material("Wax", (1.0, 0.12, 0.02), rough=0.3, emission=((1.0, 0.18, 0.02), 1.2))
     b = m.node_tree.nodes["Principled BSDF"]
-    b.inputs["Subsurface Weight"].default_value = 0.6
-    b.inputs["Subsurface Radius"].default_value = (0.3, 0.1, 0.05)
+    b.inputs["Subsurface Weight"].default_value = 0.8
+    b.inputs["Subsurface Radius"].default_value = (0.4, 0.12, 0.05)
     ob.data.materials.append(m)
-    mod, res, src = add_recipe(ob, "lava_lamp", {})
-    camera(sc, (0, -3.1, 1.05), (0, 0, 1.0), lens=50)
-    light(sc, "AREA", (2.5, -2, 3), (0, 0, 1), 500, (1.0, 0.6, 0.8), size=2)
-    light(sc, "AREA", (-2.5, 2, 2), (0, 0, 1), 400, (0.4, 0.5, 1.0), size=2)
+    mod, res, src = add_recipe(ob, "lava_lamp", {"blobs": 30, "min": 0.05, "max": 0.12, "melt": 4})
+    # the lamp: glass bottle, metal base and cap
+    glass = surface_material("Lamp glass", (0.9, 0.6, 0.85), rough=0.02, transmission=1.0, ior=1.45)
+    metal = surface_material("Lamp metal", (0.6, 0.6, 0.65), rough=0.25, metal=1.0)
+    _cone(sc, "Lamp glass", 0.42, 0.42, 2.15, (0, 0, 1.03), glass)
+    _cone(sc, "Lamp base", 0.62, 0.43, 0.45, (0, 0, -0.2), metal)
+    _cone(sc, "Lamp cap", 0.43, 0.2, 0.3, (0, 0, 2.25), metal)
+    camera(sc, (0, -4.4, 1.2), (0, 0, 1.0), lens=50)
+    light(sc, "AREA", (2.5, -2, 3), (0, 0, 1), 400, (1.0, 0.5, 0.8), size=2)
+    light(sc, "AREA", (-2.5, 2, 2), (0, 0, 1), 500, (0.35, 0.45, 1.0), size=2)
     return sc, ob, res, src
 
 
 def shot_cloud(args):
     sc = reset()
-    world(sc, (0.25, 0.45, 0.85), strength=0.8)
+    world(sc, (0.12, 0.28, 0.65), strength=1.0)
+    sc.cycles.volume_bounces = 12
+    sc.cycles.max_bounces = 16
     import bmesh
     me = bpy.data.meshes.new("CloudShape")
     bm = bmesh.new()
@@ -377,13 +428,104 @@ def shot_cloud(args):
     ob = bpy.data.objects.new("Cloud", me)
     sc.collection.objects.link(ob)
     ob.data.materials.append(volume_material("Cloud", (1, 1, 1), density=args.density, anisotropy=0.6))
-    mod, res, src = add_recipe(ob, "cloud", {"voxel_size": args.voxel or 0.02})
+    mod, res, src = add_recipe(ob, "cloud", {"voxel_size": args.voxel or 0.02, "amount": 0.3})
     camera(sc, (0, -5.2, 0.6), (0, 0, 0.42), lens=50)
-    light(sc, "SUN", (0, 0, 5), (-0.6, 0.3, 0), 4.0, (1.0, 0.92, 0.8), size=0.02)
+    light(sc, "SUN", (3, -5, 4), (0, 0, 0.4), 7.0, (1.0, 0.93, 0.82), size=0.02)
     return sc, ob, res, src
 
 
-SHOTS = {"smoke_plume": shot_smoke_plume, "fire": shot_fire, "smoke_ring": shot_smoke_ring, "bubbles": shot_bubbles,
+def _cd_material(name, rough=0.05, spec=0.5):
+    m = surface_material(name, (0.1, 0.3, 0.4), rough=rough)
+    nt = m.node_tree
+    attr = nt.nodes.new("ShaderNodeAttribute")
+    attr.attribute_name = "Cd"
+    nt.links.new(attr.outputs["Color"], nt.nodes["Principled BSDF"].inputs["Base Color"])
+    return m
+
+
+def shot_ocean_waves(args):
+    sc = reset()
+    world(sc, (0.35, 0.5, 0.75), strength=0.9)
+    ob = mesh_object(sc, "grid", "Ocean", x=420, y=420, size=18)
+    ob.data.materials.append(_cd_material("Ocean", rough=0.06))
+    mod, res, src = add_recipe(ob, "ocean_waves", {"height": 0.14, "wavelength": 2.4})
+    camera(sc, (0, -7.5, 1.35), (0, 2.0, 0.0), lens=35)
+    light(sc, "SUN", (0, 5, 3), (0, 0, 0), 4.0, (1.0, 0.85, 0.65), size=0.02)
+    return sc, ob, res, src
+
+
+def shot_whirlpool(args):
+    sc = reset()
+    world(sc, (0.05, 0.08, 0.12), strength=1.0)
+    ob = mesh_object(sc, "grid", "Whirlpool", x=260, y=260, size=4)
+    ob.data.materials.append(_cd_material("Whirlpool", rough=0.06))
+    mod, res, src = add_recipe(ob, "whirlpool", {})
+    camera(sc, (0, -3.4, 2.6), (0, 0, -0.15), lens=38)
+    light(sc, "SUN", (2, -2, 4), (0, 0, 0), 3.0, (1.0, 0.95, 0.9), size=0.03)
+    light(sc, "AREA", (-2, 2, 2.5), (0, 0, 0), 300, (0.5, 0.7, 1.0), size=3)
+    return sc, ob, res, src
+
+
+def shot_pfm_smoke(args):
+    """Zhou et al. 2024 particle flow maps: two smoke rings leapfrogging — the vortex-preservation test."""
+    sc = reset()
+    world(sc, (0.003, 0.004, 0.007))
+    ob = mesh_object(sc, "plane", "PFM Rings", size=0.1)
+    ob.data.materials.append(volume_material("PFM Smoke", (0.95, 0.95, 0.97), density=args.density, anisotropy=0.5))
+    params = {"min": (-0.9, -0.9, 0.0), "max": (0.9, 0.9, 3.2), "voxel_size": args.voxel or 0.02,
+              "buoyancy": 0.0, "radius": 0.0001, "per_voxel": 2, "reinit_frames": 1, "affine_gradient": 1.0,
+              "max_stretch": 1.5, "rings": 2, "ring_speed": 7.0, "spacing": 0.32, "ring_center": (0, 0, 0.3), "ring_radius": 0.3,
+              "smoke_core": 0.13}
+    mod, res, src = add_recipe(ob, "pfm_smoke", params)
+    camera(sc, (0, -3.4, 2.2), (0, 0, 1.15), lens=50)
+    light(sc, "AREA", (3.5, -2.0, 4.0), (0, 0, 1.6), 1800, (1.0, 0.82, 0.65), size=1.0)
+    light(sc, "AREA", (-2.5, 3.5, 3.5), (0, 0, 1.8), 2800, (0.45, 0.65, 1.0), size=2.0)
+    light(sc, "AREA", (-4, -3, 0.8), (0, 0, 1.2), 120, (0.7, 0.75, 0.9), size=5)
+    return sc, ob, res, src
+
+
+def shot_weta_bubbles(args):
+    """Wretborn, Stomakhin & Batty 2025: a two-way coupled bubble plume in a lit tank."""
+    sc = reset()
+    world(sc, (0.0, 0.006, 0.016))
+    ob = mesh_object(sc, "plane", "Air", size=0.01)
+    ob.data.materials.append(surface_material("Air in water", (1, 1, 1), rough=0.0, transmission=1.0,
+                                              ior=1.0 / 1.333))
+    params = {"voxel_size": args.voxel or 0.0125, "particles": 30000, "bubbles_per_second": 3000,
+              "radius_min": 0.0012, "radius_max": 0.009, "substeps": 3, "radius": 0.03,
+              "vents": 3, "vent_ring": 0.11, "puff_period": 0.6, "zigzag": 0.55}
+    params["merge"] = getattr(args, "merge", None) or 0.15
+    mod, res, src = add_recipe(ob, "weta_bubbles", params)
+    # water: a tinted absorbing volume filling the tank
+    water = mesh_object(sc, "cube", "Water", size=1.0)
+    water.scale, water.location = (0.6, 0.6, 1.0), (0, 0, 0.5)
+    wm = bpy.data.materials.new("Water")
+    wm.use_nodes = True
+    nt = wm.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    pv = nt.nodes.new("ShaderNodeVolumePrincipled")
+    pv.inputs["Color"].default_value = (0.35, 0.75, 0.95, 1)
+    pv.inputs["Density"].default_value = 0.35
+    pv.inputs["Absorption Color"].default_value = (0.2, 0.55, 0.75, 1)
+    pv.inputs["Anisotropy"].default_value = 0.6
+    nt.links.new(pv.outputs["Volume"], out.inputs["Volume"])
+    water.data.materials.append(wm)
+    # backlight and a "sun through the surface" from above
+    back = mesh_object(sc, "plane", "Backlight", size=3)
+    back.location, back.rotation_euler = (0, 1.2, 0.6), (math.radians(90), 0, 0)
+    back.data.materials.append(surface_material("Glow", (0, 0, 0), emission=((0.03, 0.22, 0.6), 0.22)))
+    cam = camera(sc, (0, -1.35, 0.5), (0, 0, 0.52), lens=50)
+    cam.data.dof.use_dof = True
+    cam.data.dof.focus_distance = 1.35
+    cam.data.dof.aperture_fstop = 2.8
+    light(sc, "SPOT", (0.15, -0.1, 1.6), (0, 0, 0.4), 420, (0.85, 0.95, 1.0), size=0.05)
+    light(sc, "AREA", (-0.9, -0.6, 0.7), (0, 0, 0.5), 40, (0.6, 0.8, 1.0), size=1.0)
+    return sc, ob, res, src
+
+
+SHOTS = {"pfm_smoke": shot_pfm_smoke, "weta_bubbles": shot_weta_bubbles, "ocean_waves": shot_ocean_waves, "whirlpool": shot_whirlpool, "smoke_plume": shot_smoke_plume, "fire": shot_fire, "smoke_ring": shot_smoke_ring, "bubbles": shot_bubbles,
          "shallow_water": shot_shallow_water, "galaxy": shot_galaxy, "lava_lamp": shot_lava_lamp,
          "cloud": shot_cloud}
 

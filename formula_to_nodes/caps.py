@@ -35,6 +35,7 @@ FEATURES = {
                       "GeometryNodeGetNamedGrid", "GeometryNodeSampleGrid", "GeometryNodeGridAdvect")),
     "poisson": ((5, 3, 0), "the native Poisson solver: volumeproject() / volumesolve() in one node "
                            "(older versions iterate)", ("GeometryNodeGridSolvePoisson",)),
+    "cubic_sampling": ((5, 3, 0), "tricubic grid sampling (volumesample(..., \"cubic\"))", ()),
     "rasterize_points": ((5, 3, 0), "rasterize(): points → volume grids", ("GeometryNodeRasterizePoints",)),
     # Blender 5.3 nodes that make existing features smaller or faster
     "combine_list": ((5, 3, 0), "array literals built with one Combine List node", ("GeometryNodeCombineList",)),

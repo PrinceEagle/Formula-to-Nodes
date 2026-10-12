@@ -19,7 +19,7 @@ them fast: the solver work happens inside Blender's OpenVDB nodes.
 import ast
 import math
 
-from .core import FLOAT, INT, BOOL, VECTOR, VOID, SOCKET_DTYPE, Val, reg, FormulaError, type_word
+from .core import FLOAT, INT, BOOL, VECTOR, MATRIX, VOID, SOCKET_DTYPE, Val, reg, FormulaError, type_word
 
 # Store Named Grid uses its own data type names
 GRID_STORE = {FLOAT: "FLOAT", VECTOR: "VECTOR_FLOAT", INT: "INT", BOOL: "BOOLEAN"}
@@ -64,11 +64,21 @@ reg("volumedivergence", 'volumedivergence("vel", "out")', "divergence of a vecto
 reg("volumegrad", 'volumegrad("grid", "out")', "gradient of a float grid into a new vector grid",
     V, "v_derivative", effect=True, feature="volume_grids", node="GeometryNodeGridGradient", tin=FLOAT,
     tout=VECTOR, sock="Gradient")
-reg("rasterize", 'rasterize("grid", value, voxelsize [, "linear"])',
-    "splats a per-point value into a grid (kernels: constant, linear, quadratic, cubic)", V, "v_rasterize",
+reg("rasterize", 'rasterize("grid", value, voxelsize [, "linear" [, "average"]])',
+    "splats a per-point value into a grid (kernels: constant, linear, quadratic, cubic); voxelsize 0 lines up "
+    "with volumebounds(); \"average\" gives the weighted average (particle-to-grid)", V, "v_rasterize",
     effect=True, feature="rasterize_points")
-reg("volumefrommesh", 'volumefrommesh("grid", voxelsize [, "sdf" | "fog"])',
-    "the mesh as a signed distance grid (negative inside) or a fog grid (1 inside)", V, "v_from_mesh",
+reg("volumejacobian", 'volumejacobian(geo, "vel", pos [, h])',
+    "velocity gradient ∂u_i/∂x_j of a vector grid at pos, as a matrix (central differences)", "Sampling",
+    "f_volumejacobian", feature="volume_grids")
+reg("matrix3", "matrix3(c0, c1, c2)", "matrix from three column vectors (mulvec(m, v) = c0·v.x + c1·v.y + c2·v.z)",
+    "Rotation & matrix", "f_matrix3")
+reg("matcol", "matcol(m, j)", "column j (0, 1, 2) of a matrix", "Rotation & matrix", "f_matcol")
+reg("matmul", "matmul(a, b)", "matrix product a·b (maths order)", "Rotation & matrix", "f_matmul")
+reg("mulvec", "mulvec(m, v)", "matrix times vector m·v (no translation)", "Rotation & matrix", "f_mulvec")
+reg("volumefrommesh", 'volumefrommesh("grid", voxelsize [, "sdf" | "fog", band])',
+    "the mesh as a signed distance grid (negative inside) or a fog grid (1 inside); band = how far "
+    "from the surface the distance is exact (default 3 voxels)", V, "v_from_mesh",
     effect=True, feature="volume_grids")
 reg("volumefrompoints", 'volumefrompoints("grid", voxelsize [, radius])',
     "spheres around the points as one signed distance grid (radius defaults to @pscale) — metaballs, blobs",
@@ -423,11 +433,13 @@ class VolumeOps:
 
     # ── conversions ────────────────────────────────────────────────────────
     def v_rasterize(self, node, name):
-        if len(node.args) not in (3, 4):
-            raise FormulaError(f"{name}() takes {name}(\"grid\", value, voxelsize [, \"linear\"])")
+        if len(node.args) not in (3, 4, 5):
+            raise FormulaError(f'{name}() takes {name}("grid", value, voxelsize [, "linear" [, "average"]])')
         if self.domain not in ("POINT", "DETAIL"):
             raise FormulaError(f"{name}() splats points — run it over points")
-        self._vol_stmt(name)
+        if self.selection() is not None:
+            raise FormulaError(f"{name}() splats every point, so it can't be inside an if — multiply the value by "
+                               f"your condition instead")
         gname, t0 = self._split_grid_name(self.str_const(node.args[0], f"{name}()'s grid").strip(), name)
         val = self.expr(node.args[1])
         if val.t not in (FLOAT, INT, BOOL, VECTOR):
@@ -436,40 +448,188 @@ class VolumeOps:
         if t0 is not None and t0 != t:
             raise FormulaError(f"{name}(): the value is a {type_word(val.t)} but the grid is {type_word(t0)}")
         vs = self._const_or_single(node.args[2], FLOAT, f"{name}()'s voxel size")
+        aligned = vs.is_const and vs.c == 0
+        if aligned and self.vol_space is None:
+            raise FormulaError(f"{name}() with voxel size 0 lines up with volumebounds() — call that first")
         kernel = "Linear"
-        if len(node.args) == 4:
+        if len(node.args) >= 4:
             word = self.str_const(node.args[3], f"{name}()'s kernel").strip().lower()
             if word not in KERNELS:
                 raise FormulaError("kernels: constant, linear, quadratic, cubic")
             kernel = KERNELS[word]
-        pos = self.g.add("GeometryNodeInputPosition").out("Position")
-        n = self.g.add("GeometryNodeRasterizePoints", {},
-                       {"Points": self.ctx.geo, "Grid Transform Mode": "Voxel Size",
-                        "Voxel Size": self.inp(vs, FLOAT), "Kernel Type": kernel, "Position": pos,
-                        "Item_0": self.inp(self.coerce(val, t), t)},
-                       items=[("VECTOR" if t == VECTOR else "SCALAR", gname)], items_attr="rasterize_items",
-                       label=self.cur_text[:60] or None)
-        self.store_grid(gname, t, n.out("Item_0"))
+        average = False
+        if len(node.args) == 5:
+            mode = self.str_const(node.args[4], f"{name}()'s mode").strip().lower()
+            if mode not in ("sum", "average"):
+                raise FormulaError(f'{name}(): the mode is "sum" (splat) or "average" (weighted average, like '
+                                   f'particle-to-grid in PIC/FLIP)')
+            average = mode == "average"
+        key = ("aligned" if aligned else (vs.o.key() if vs.o is not None else ("c", vs.c)), kernel)
+        self.ctx.rasters.append((key, gname, t, self.coerce(val, t), vs, kernel, average, self.cur_text[:60]))
+        self.grid_info[gname] = t
+        self.writes += 1
         return Val(VOID)
 
+    def flush_grids(self, ctx):
+        self.flush_rasters(ctx)
+        self.flush_voxels(ctx)
+
+    def flush_rasters(self, ctx):
+        """One Rasterize Points node per (voxel size, kernel): all channels splat in a single pass over
+        the points. Averaged channels divide by a shared weight channel in one Field to Grid node."""
+        if not ctx.rasters:
+            return
+        groups = {}
+        for r in ctx.rasters:
+            groups.setdefault(r[0], []).append(r)
+        ctx.rasters = []
+        saved, self.ctx = self.ctx, ctx
+        try:
+            for key, items in groups.values() if False else groups.items():
+                _k, _g, _t, _v, vs, kernel, _a, label = items[0]
+                need_w = any(r[6] for r in items)
+                inputs = {"Points": self.ctx.geo, "Kernel Type": kernel,
+                          "Position": self.g.add("GeometryNodeInputPosition").out("Position")}
+                if key[0] == "aligned":
+                    info = self.g.add("GeometryNodeGridInfo", {"data_type": "BOOLEAN"}, {"Grid": self.vol_space.topo})
+                    inputs.update({"Grid Transform Mode": "Matrix", "Matrix": info.out("Transform")})
+                else:
+                    inputs.update({"Grid Transform Mode": "Voxel Size", "Voxel Size": self.inp(vs, FLOAT)})
+                specs = []
+                for k, (_k2, gname, t, val, _vs, _kn, _av, _l) in enumerate(items):
+                    inputs[f"Item_{k}"] = self.inp(val, t)
+                    specs.append(("VECTOR" if t == VECTOR else "SCALAR", gname))
+                if need_w:
+                    inputs[f"Item_{len(items)}"] = 1.0
+                    specs.append(("SCALAR", "weight"))
+                names = ", ".join(r[1] for r in items)
+                node = self.g.add("GeometryNodeRasterizePoints", {}, inputs, items=specs,
+                                  items_attr="rasterize_items", label=f"splat: {names}"[:60])
+                if not need_w:
+                    for k, r in enumerate(items):
+                        self.store_grid(r[1], r[2], node.out(f"Item_{k}"))
+                        self.writes -= 1
+                    continue
+                w = node.out(f"Item_{len(items)}")
+                topo = self.vol_space.topo if key[0] == "aligned" else w
+                wv = self.math("MAXIMUM", self.sample_here(w, FLOAT), Val(FLOAT, c=1e-9))
+                avg = [(k, r) for k, r in enumerate(items) if r[6]]
+                f2g = self.g.add("GeometryNodeFieldToGrid", {"data_type": "FLOAT"},
+                                 {"Topology": topo, **{
+                                     f"Field_{i}": self.inp(
+                                         (self.vmath("SCALE", self.sample_here(node.out(f"Item_{k}"), VECTOR),
+                                                     scale=self.math("DIVIDE", Val(FLOAT, c=1.0), wv))
+                                          if r[2] == VECTOR else
+                                          self.math("DIVIDE", self.sample_here(node.out(f"Item_{k}"), FLOAT), wv)),
+                                         r[2]) for i, (k, r) in enumerate(avg)}},
+                                 items=[(SOCKET_DTYPE[r[2]], r[1]) for _k, r in avg], items_attr="grid_items",
+                                 label="average: " + ", ".join(r[1] for _k, r in avg)[:50])
+                for k, r in enumerate(items):
+                    if not r[6]:
+                        self.store_grid(r[1], r[2], node.out(f"Item_{k}"))
+                        self.writes -= 1
+                for i, (_k, r) in enumerate(avg):
+                    self.store_grid(r[1], r[2], f2g.out(f"Grid_{i}"))
+                    self.writes -= 1
+        finally:
+            self.ctx = saved
+
+    # ── matrices and derivatives at a point ────────────────────────────────
+    def f_volumejacobian(self, node, name):
+        if len(node.args) not in (3, 4):
+            raise FormulaError(f'{name}() takes {name}(geo, "vel", pos [, h])')
+        geo, _ = self.geo_arg(node.args[0], name)
+        gname = self.str_const(node.args[1], f"{name}()'s grid")
+        pos = self.coerce(self.expr(node.args[2]), VECTOR, f"{name}()'s position")
+        if len(node.args) == 4:
+            h = self.coerce(self.expr(node.args[3]), FLOAT, f"{name}()'s step")
+        elif self.vol_space is not None and self.vol_space.voxel is not None:
+            h = self.vol_space.voxel
+        else:
+            raise FormulaError(f"{name}() needs the finite-difference step h (or call volumebounds() first)")
+        if self.ctx.rasters or self.ctx.voxels:
+            self.flush_grids(self.ctx)
+        grid = self.get_grid(gname, VECTOR, geo)
+        cols = []
+        for axis in range(3):
+            e = [0.0, 0.0, 0.0]
+            e[axis] = 1.0
+            d = self.vmath("SCALE", Val(VECTOR, c=tuple(e)), scale=h)
+            s = []
+            for sign in (1, -1):
+                p = self.vmath("ADD" if sign > 0 else "SUBTRACT", pos, d)
+                n = self.g.add("GeometryNodeSampleGrid", {"data_type": "VECTOR"},
+                               {"Grid": grid, "Position": self.inp(p, VECTOR)})
+                s.append(Val(VECTOR, o=n.out("Value"), field=True))
+            cols.append(self.vmath("SCALE", self.vmath("SUBTRACT", s[0], s[1]),
+                                   scale=self.math("DIVIDE", Val(FLOAT, c=0.5), h)))
+        return self.matrix_from_columns(cols)
+
+    def matrix_from_columns(self, cols):
+        inputs = {}
+        for j, c in enumerate(cols):
+            for i in range(3):
+                inputs[f"Column {j + 1} Row {i + 1}"] = self.inp(self.sep(c, i), FLOAT)
+        n = self.g.add("FunctionNodeCombineMatrix", {}, inputs)
+        return Val(MATRIX, o=n.out("Matrix"), field=any(c.field for c in cols))
+
+    def f_matrix3(self, node, name):
+        if len(node.args) != 3:
+            raise FormulaError(f"{name}() takes three column vectors: {name}(c0, c1, c2)")
+        cols = [self.coerce(self.expr(a), VECTOR, f"{name}()'s column") for a in node.args]
+        return self.matrix_from_columns(cols)
+
+    def f_matcol(self, node, name):
+        if len(node.args) != 2 or not isinstance(node.args[1], ast.Constant) or node.args[1].value not in (0, 1, 2):
+            raise FormulaError(f"{name}() takes {name}(m, 0 | 1 | 2)")
+        m = self.coerce(self.expr(node.args[0]), MATRIX, f"{name}()'s matrix")
+        j = int(node.args[1].value)
+        n = self.g.add("FunctionNodeSeparateMatrix", {}, {"Matrix": self.inp(m, MATRIX)})
+        return self.combine([Val(FLOAT, o=n.out(f"Column {j + 1} Row {i + 1}"), field=m.field) for i in range(3)])
+
+    def f_matmul(self, node, name):
+        if len(node.args) != 2:
+            raise FormulaError(f"{name}() takes {name}(a, b) — the product a·b")
+        a = self.coerce(self.expr(node.args[0]), MATRIX, f"{name}()'s first matrix")
+        b = self.coerce(self.expr(node.args[1]), MATRIX, f"{name}()'s second matrix")
+        n = self.g.add("FunctionNodeMatrixMultiply", {}, {"Matrix": self.inp(a, MATRIX), "Matrix_001": self.inp(b, MATRIX)})
+        return Val(MATRIX, o=n.out("Matrix"), field=a.field or b.field)
+
+    def f_mulvec(self, node, name):
+        if len(node.args) != 2:
+            raise FormulaError(f"{name}() takes {name}(m, v) — the product m·v")
+        m = self.coerce(self.expr(node.args[0]), MATRIX, f"{name}()'s matrix")
+        v = self.coerce(self.expr(node.args[1]), VECTOR, f"{name}()'s vector")
+        n = self.g.add("FunctionNodeTransformDirection", {}, {"Direction": self.inp(v, VECTOR),
+                                                             "Transform": self.inp(m, MATRIX)})
+        return Val(VECTOR, o=n.out("Direction"), field=m.field or v.field)
+
     def v_from_mesh(self, node, name):
-        if len(node.args) not in (2, 3):
-            raise FormulaError(f"{name}() takes {name}(\"grid\", voxelsize [, \"sdf\" | \"fog\"])")
+        if len(node.args) not in (2, 3, 4):
+            raise FormulaError(f"{name}() takes {name}(\"grid\", voxelsize [, \"sdf\" | \"fog\", band])")
         self._vol_stmt(name)
         gname, _t = self._split_grid_name(self.str_const(node.args[0], f"{name}()'s grid").strip(), name)
         vs = self._const_or_single(node.args[1], FLOAT, f"{name}()'s voxel size")
+        band = Val(INT, c=3)
+        if len(node.args) == 4:
+            dist = self._const_or_single(node.args[3], FLOAT, f"{name}()'s band")
+            if dist.is_const and vs.is_const:
+                band = Val(INT, c=max(1, int(math.ceil(dist.c / vs.c))))
+            else:
+                band = self.coerce(self.math("CEIL", self.math("DIVIDE", dist, vs)), INT)
         kind = "sdf"
-        if len(node.args) == 3:
+        if len(node.args) >= 3:
             kind = self.str_const(node.args[2], f"{name}()'s kind").strip().lower()
             if kind not in ("sdf", "fog", "density"):
                 raise FormulaError(f'{name}(): use "sdf" (signed distance) or "fog" (1 inside)')
         if kind == "sdf":
             n = self.g.add("GeometryNodeMeshToSDFGrid", {}, {"Mesh": self.ctx.geo, "Voxel Size": self.inp(vs, FLOAT),
-                                                            "Band Width": 3}, label=self.cur_text[:60] or None)
+                                                            "Band Width": self.inp(band, INT)}, label=self.cur_text[:60] or None)
             out = n.out("SDF Grid")
         else:
             n = self.g.add("GeometryNodeMeshToDensityGrid", {},
-                           {"Mesh": self.ctx.geo, "Voxel Size": self.inp(vs, FLOAT), "Density": 1.0},
+                           {"Mesh": self.ctx.geo, "Voxel Size": self.inp(vs, FLOAT), "Density": 1.0,
+                            "Gradient Width": self.inp(self.coerce(band, FLOAT), FLOAT)},
                            label=self.cur_text[:60] or None)
             out = n.out("Density Grid")
         self.store_grid(gname, FLOAT, out)

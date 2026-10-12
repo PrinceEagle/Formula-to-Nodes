@@ -39,7 +39,8 @@ def _cases():
     out = [(f"example:{e[0]}", e[3]) for e in examples.EXAMPLES]
     # grids (runover(voxel) { } and the volume* operations) aren't converted back to scripts yet
     out += [(f"recipe:{r.key}", r.script) for r in recipes.RECIPES
-            if not r.test.get("inputs") and not r.test.get("prelude") and r.category not in recipes.VOLUME_CATEGORIES]
+            if not r.test.get("inputs") and not r.test.get("prelude") and r.category not in recipes.VOLUME_CATEGORIES
+            and not any(w in r.script for w in ("volumebounds", "rasterize(", "volumefrom"))]
     return out + [(f"extra:{k}", s) for k, s in EXTRA]
 
 
