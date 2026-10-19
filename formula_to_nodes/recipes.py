@@ -14,6 +14,23 @@ CATEGORIES = ["From Houdini", "Masks", "Deformers", "Scatter & Instance", "Growt
               "Volumes", "Effectors", "Color", "Curves", "Modeling", "Utility"]
 VOLUME_CATEGORIES = ("Smoke & Fire", "Volumes")     # recipes built on grids
 
+# colour code per category: families share a colour (simulation = red, fluids = blue ...).
+# icon = Blender's strip colour swatch; hex = the same colour for promo material
+CATEGORY_COLOR = {
+    "From Houdini": ("STRIP_COLOR_02", "#f1a355"),
+    "Masks": ("STRIP_COLOR_03", "#f1dc55"), "Color": ("STRIP_COLOR_03", "#f1dc55"),
+    "Deformers": ("STRIP_COLOR_06", "#8d59da"),
+    "Scatter & Instance": ("STRIP_COLOR_04", "#7bcc7b"),
+    "Effectors": ("STRIP_COLOR_07", "#c673b8"),
+    "Growth & Simulation": ("STRIP_COLOR_01", "#e2605b"), "Smoke & Fire": ("STRIP_COLOR_01", "#e2605b"),
+    "Liquids": ("STRIP_COLOR_05", "#5db6ea"), "Volumes": ("STRIP_COLOR_05", "#5db6ea"),
+    "Modeling": ("STRIP_COLOR_08", "#a0745c"), "Curves": ("STRIP_COLOR_08", "#a0745c"),
+    "Utility": ("STRIP_COLOR_09", "#8c8c8c"),
+}
+LEVELS = ("Beginner", "Intermediate", "Advanced")
+# five first recipes that work on any mesh with nothing to set up
+START_HERE = ("twist", "noise_displace", "spherize", "ripple", "height_colors")
+
 
 class Recipe:
     __slots__ = ("key", "title", "category", "description", "script", "tags", "needs", "test", "blender")
@@ -1522,6 +1539,51 @@ def get(key):
     return BY_KEY.get(key)
 
 
+def category_icon(cat):
+    return CATEGORY_COLOR.get(cat, ("STRIP_COLOR_09", "#8c8c8c"))[0]
+
+
+def category_hex(cat):
+    return CATEGORY_COLOR.get(cat, ("STRIP_COLOR_09", "#8c8c8c"))[1]
+
+
+def _code_lines(script):
+    return [ln for ln in script.splitlines() if ln.strip() and not ln.strip().startswith("//")]
+
+
+def level(r):
+    """Beginner / Intermediate / Advanced, from what the script uses."""
+    code = _code_lines(r.script)
+    text = "\n".join(code)
+    if (r.blender > (5, 2, 0) or len(code) > 22 or any(w in text for w in (
+            "simulate", "volumebounds", "rasterize", "runover(voxel)", "volumeproject"))):
+        return "Advanced"
+    if (len(code) <= 6 and not r.needs and not any(w in text for w in (
+            "repeat", "foreach", "for (", "#include", "runover", "#runover", "{\n"))):
+        return "Beginner"
+    return "Intermediate"
+
+
+# everyday words → the words recipes use, so beginners find things by what they want
+SYNONYMS = {
+    "color": ("colour",), "colour": ("color",), "colors": ("colour",), "colours": ("colour",),
+    "rock": ("displace", "greeble", "mountain", "fractal"), "rocks": ("displace", "scatter"),
+    "stone": ("displace", "greeble"), "terrain": ("mountain", "height", "fractal"), "landscape": ("mountain", "terrain"),
+    "tree": ("instance", "scatter"), "trees": ("instance", "scatter"), "forest": ("scatter", "instance"),
+    "grass": ("scatter", "grass"), "plants": ("scatter", "instance"), "copy": ("instance", "copies"),
+    "clone": ("cloner", "instance"), "array": ("cloner", "copies"), "duplicate": ("instance", "copies"),
+    "water": ("liquid", "wave", "ocean"), "sea": ("ocean", "wave"), "ocean": ("wave",), "rain": ("ripple",),
+    "fire": ("smoke", "flame"), "flame": ("fire",), "cloud": ("volume", "fog"), "fog": ("volume", "mist"),
+    "animate": ("time", "over time", "wave"), "animation": ("time", "over time"), "move": ("time", "push"),
+    "spin": ("rotate",), "rotate": ("spin", "rotation"), "bend": ("deform", "bend"), "deform": ("displace",),
+    "bumpy": ("noise", "displace"), "random": ("rand", "jitter", "noise"), "wobble": ("noise", "jitter"),
+    "particles": ("particle", "pop"), "dust": ("particle",), "sand": ("particle", "scatter"),
+    "mask": ("mask", "selection", "group"), "select": ("group", "selection", "mask"),
+    "pattern": ("hexagon", "voronoi", "cells"), "tile": ("hexagon", "grid"), "shrink": ("peak", "taper"),
+    "inflate": ("peak", "spherize"), "smooth": ("smooth", "relax"), "melt": ("melt",),
+}
+
+
 def search(text):
     """Recipes matching every word first, then those matching some of them (best first) —
     so "attribute transfer" or a Houdini SOP name finds the closest tools even when not all words hit."""
@@ -1532,9 +1594,12 @@ def search(text):
     for r in RECIPES:
         hay = " ".join([r.key.replace("_", " "), r.title, r.category, r.description, " ".join(r.tags)]).lower()
         title = (r.title + " " + " ".join(r.tags)).lower()
-        hit = sum(1 for w in words if w in hay)
+        def found(w, where):
+            return w in where or any(alt in where for alt in SYNONYMS.get(w, ()))
+        hit = sum(1 for w in words if found(w, hay))
         if hit:
-            scored.append((hit == len(words), hit, sum(1 for w in words if w in title), r))
+            direct = sum(1 for w in words if w in title)
+            scored.append((hit == len(words), hit, direct + sum(1 for w in words if found(w, title)), r))
     scored.sort(key=lambda x: (not x[0], -x[1], -x[2]))
     full = [r for ok, _h, _t, r in scored if ok]
     return full if full else [r for _ok, _h, _t, r in scored[:8]]

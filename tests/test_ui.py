@@ -144,5 +144,47 @@ class UITest(unittest.TestCase):
         self.assertIn("f@a = 1;", rec.as_string())
 
 
+    def test_recipe_search_filters(self):
+        from formula_to_nodes import recipes
+        self.assertEqual(set(recipes.CATEGORIES) - set(recipes.CATEGORY_COLOR), set())
+        s = self.s
+        s.recipe_query = "attribute transfer"
+        self.assertEqual(ui.filtered_recipes(s)[0].key, "attrib_transfer")
+        s.recipe_query = ""
+        s.recipe_category = "Liquids"
+        self.assertTrue(all(r.category == "Liquids" for r in ui.filtered_recipes(s)))
+        s.recipe_category = "ALL"
+        s.recipe_level = "Beginner"
+        self.assertTrue(all(recipes.level(r) == "Beginner" for r in ui.filtered_recipes(s)))
+        s.recipe_level = "ALL"
+        for key in recipes.START_HERE:
+            self.assertIn(key, recipes.BY_KEY)
+        items = ui._search_items(None, bpy.context)
+        self.assertEqual(len(items), len(recipes.RECIPES))
+
+    def test_apply_recipe_one_click(self):
+        ob = bpy.context.view_layer.objects.active
+        res = bpy.ops.node.formula_apply_recipe(key="twist")
+        self.assertEqual(res, {"FINISHED"})
+        mod = next(m for m in ob.modifiers if m.type == "NODES")
+        self.assertTrue(build.is_formula_group(mod.node_group))
+        self.assertIn("rotate(", ui.script_text(self.s))
+
+    def test_viewport_panel_and_no_selection_hint(self):
+        self.assertTrue(hasattr(bpy.types, "FORMULA_PT_view_recipes"))
+        bpy.context.view_layer.objects.active = None
+        self.assertFalse(bpy.ops.node.formula_apply_recipe.poll())
+
+    def test_status_wraps_to_panel_width(self):
+        class C:
+            class region:
+                width = 561
+            preferences = bpy.context.preferences
+        n = ui._chars(C)
+        sc = max(bpy.context.preferences.system.ui_scale, 0.5)
+        self.assertLessEqual(n * 8 * sc, 561)        # a line of text fits beside the icon
+        self.assertGreaterEqual(n, 18)
+
+
 if __name__ == "__main__":
     unittest.main()

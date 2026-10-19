@@ -16,6 +16,18 @@ editable node group — open it, rewire it, learn from it. Nothing is baked or h
 The syntax is VEX-flavoured, so a Houdini wrangle translates directly. If you've never
 written one, it reads like the formula you'd write on paper.
 
+## Never used it? Start here
+
+1. Install the zip: *Edit → Preferences → Get Extensions → ⌄ → Install from Disk*.
+2. Select any mesh, open the 3D Viewport sidebar (**N**) and pick the **Formula** tab.
+3. Click **Twist** under *Start here*. Change it with the sliders in the Modifier tab.
+
+Search the 91 recipes in plain words (*rock*, *trees*, *water*, *fire*), filter by colour-coded
+category or by level (easy / medium / advanced), and click **+** to add one to the selected
+object. Step-by-step cards are in [`promo/guide_cards`](promo/guide_cards).
+
+![Every recipe, colour-coded by category](promo/guide_cards/web_recipes.png)
+
 ## What it does
 
 - **Single-line formulas** or **multi-line scripts** with typed local variables, edited in the

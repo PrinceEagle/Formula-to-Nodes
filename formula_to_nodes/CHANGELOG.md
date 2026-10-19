@@ -1,3 +1,30 @@
+# Formula to Nodes 3.2.1 — Beginner friendly recipes
+
+Shaped by a second usability round with two newcomers (a complete beginner, and a Blender
+user who has never written code) on Blender 5.3.
+
+## Finding recipes
+- Recipes panel with a search field that understands everyday words (rock, trees, water,
+  fire, wobble, colour…) and Houdini names (attribute transfer, polyextrude…).
+- Colour-coded categories (the same colours in the menu, panel and guide) and a level for
+  every recipe: easy / medium / advanced. Filter by category and level; Reset Filters.
+- "Start here" box with five recipes that work on any mesh.
+- Pop-up search (magnifier in the panel header) over all recipes.
+
+## One click
+- "+" next to every recipe builds it straight onto the selected object as a modifier.
+- New "Formula" tab in the 3D Viewport sidebar with the same recipe browser — beginners
+  don't have to find the node editor. There, clicking a recipe name applies it.
+- Selecting nothing shows "Select a mesh first" instead of a silently greyed-out button.
+- Colour recipes switch Solid viewports to show the colour attribute, so the result is
+  visible right away.
+- Generate from Script with no tree open adds the new group to the active object.
+- Status messages say what to do next and wrap correctly on high-DPI screens.
+
+## Guide
+- Getting Started guide, ten step-by-step cards, a colour-coded poster of every recipe and
+  a rendered gallery of all 91 recipes (promo/guide_cards).
+
 # Formula to Nodes 3.2.0 — Live Viewer, Houdini-friendly
 
 Shaped by usability sessions with three Houdini artists (FX TD, environment/modeling,

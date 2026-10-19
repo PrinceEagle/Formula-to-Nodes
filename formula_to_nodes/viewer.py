@@ -37,7 +37,7 @@ ERR = (1.0, 0.42, 0.40, 1)
 ATTR_FIELD = {"FLOAT": ("value", 1), "INT": ("value", 1), "INT8": ("value", 1), "BOOLEAN": ("value", 1),
               "FLOAT_VECTOR": ("vector", 3), "FLOAT2": ("vector", 2), "INT32_2D": ("value", 2),
               "FLOAT_COLOR": ("color", 4), "BYTE_COLOR": ("color", 4), "QUATERNION": ("value", 4)}
-MAX_ROWS = 14            # inputs shown before "+N more"
+MAX_ROWS = 10            # inputs shown before "+N more"
 MAX_ATTRS = 8
 SAMPLE_LIMIT = 2_000_000  # elements read per attribute before striding
 
@@ -85,6 +85,11 @@ def _compile(s):
     if key == _state["hash"]:
         return False
     _state.update(hash=key, lines=src.split("\n"), mode=mode)
+    untouched = mode == "FORMULA" and src == s.bl_rna.properties["formula"].default
+    _state["idle"] = untouched
+    if untouched:          # nothing written yet: show a hint instead of the sample formula
+        _state.update(result=None, error=None)
+        return True
     t = time.perf_counter()
     try:
         res = compiler.compile_source(src, mode, s.output_type if mode == "FORMULA" else "AUTO",
@@ -369,6 +374,10 @@ def _draw_card(context, s):
     fs, fsm = 12 * ui, 10.5 * ui
     res, err = _state["result"], _state["error"]
     gpu.state.blend_set("ALPHA")
+    if _state.get("idle"):
+        _draw_hint(context, s, ui, W, pad, fs, fsm)
+        gpu.state.blend_set("NONE")
+        return
 
     # ── content, measured first (y grows downward from the top) ──
     items = []                        # (kind, payload, height)
@@ -533,10 +542,54 @@ def _draw_card(context, s):
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _draw_hint(context, s, ui, W, pad, fs, fsm):
+    region, area = context.region, context.area
+    lines = _wrap("Pick a recipe in the sidebar (N › Formula), or write a script — the node it becomes "
+                  "appears here as you type.", W - 2 * pad, fsm, 4)
+    header = 28 * ui
+    H = header + len(lines) * 15 * ui + pad * 1.5
+    x = (_right_edge(region, area) - 14 * ui - W) if s.viewer_corner == "RIGHT" else 14 * ui
+    top = region.height - 14 * ui
+    y0 = top - H
+    theme = context.preferences.themes[0].node_editor
+    head_col = tuple(theme.group_node)[:3] + (0.85,)
+    _rect(x, y0, W, H, (0.16, 0.165, 0.18, 0.85), 6 * ui)
+    _rect(x, top - header, W, header, head_col, 6 * ui)
+    _rect(x, top - header, W, 6 * ui, head_col)
+    _text("Formula viewer", x + pad, top - header + 9 * ui, fs, TEXT)
+    y = top - header - 16 * ui
+    for ln in lines:
+        _text(ln, x + pad, y, fsm, MUTED)
+        y -= 15 * ui
+
+
+_NS_KEY = "formula_to_nodes_viewer"
+
+
+def _forget_previous():
+    """A reload (or a failed one) must never leave an old copy drawing: the live handle and the
+    state of whichever module registered it are kept in one shared place and retired here."""
+    prev = bpy.app.driver_namespace.get(_NS_KEY)
+    if not prev:
+        return
+    handle, state, tick = prev
+    try:
+        bpy.types.SpaceNodeEditor.draw_handler_remove(handle, "WINDOW")
+    except (ValueError, TypeError, RuntimeError):
+        pass
+    state["hash"] = None
+    state["result"] = None
+    if tick is not None and bpy.app.timers.is_registered(tick):
+        bpy.app.timers.unregister(tick)
+    bpy.app.driver_namespace.pop(_NS_KEY, None)
+
+
 def register():
     global _handle
+    _forget_previous()
     if _handle is None:
         _handle = bpy.types.SpaceNodeEditor.draw_handler_add(_draw, (), "WINDOW", "POST_PIXEL")
+        bpy.app.driver_namespace[_NS_KEY] = (_handle, _state, _tick)
     if not bpy.app.timers.is_registered(_tick):
         bpy.app.timers.register(_tick, first_interval=0.5, persistent=True)
     for hs in (bpy.app.handlers.depsgraph_update_post, bpy.app.handlers.frame_change_post):
@@ -548,8 +601,14 @@ def register():
 def unregister():
     global _handle
     if _handle is not None:
-        bpy.types.SpaceNodeEditor.draw_handler_remove(_handle, "WINDOW")
+        try:
+            bpy.types.SpaceNodeEditor.draw_handler_remove(_handle, "WINDOW")
+        except (ValueError, TypeError, RuntimeError):
+            pass
         _handle = None
+    if bpy.app.driver_namespace.get(_NS_KEY, (None,))[0] is not None:
+        bpy.app.driver_namespace.pop(_NS_KEY, None)
+    _state["hash"] = None
     if bpy.app.timers.is_registered(_tick):
         bpy.app.timers.unregister(_tick)
     for hs in (bpy.app.handlers.depsgraph_update_post, bpy.app.handlers.frame_change_post):

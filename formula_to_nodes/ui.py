@@ -181,6 +181,17 @@ def compile_and_build(context, space, source, mode, output, report):
                 gn.location = space.cursor_location
                 gn.select = True
                 edit.nodes.active = gn
+            elif space is not None and space.edit_tree is None and any(i.key == "out:Geometry" for i in result.iface):
+                # nothing open in the node editor: put the new group on the selected object as a modifier
+                ob = context.view_layer.objects.active if context.view_layer else None
+                if ob is not None and ob.type in ("MESH", "CURVES", "CURVE", "POINTCLOUD", "VOLUME"):
+                    mod = ob.modifiers.new(tree.name, "NODES")
+                    mod.node_group = tree
+                    try:
+                        ob.modifiers.active = mod
+                    except (AttributeError, TypeError):
+                        pass
+                    verb = f"Added to {ob.name}:"
     except build.BuildError as e:
         set_status(s, "ERROR", f"Build failed: {e}")
         report({"ERROR"}, f"Build failed: {e}")
@@ -204,6 +215,39 @@ def compile_and_build(context, space, source, mode, output, report):
 
 class FORMULA_PG_ScriptLine(PropertyGroup):
     text: StringProperty(name="", default="")
+
+
+_CATEGORY_ITEMS = []
+
+
+def _category_items(self, context):
+    if not _CATEGORY_ITEMS:
+        _CATEGORY_ITEMS.append(("ALL", "All categories", "", "PRESET", 0))
+        for i, c in enumerate(recipes.CATEGORIES):
+            _CATEGORY_ITEMS.append((c, c, f"Only {c} recipes", recipes.category_icon(c), i + 1))
+    return _CATEGORY_ITEMS
+
+
+_SEARCH_ITEMS = []
+
+
+def _search_items(self, context):
+    if not _SEARCH_ITEMS:
+        for i, r in enumerate(recipes.RECIPES):
+            words = " ".join(t for t in r.tags[:4])
+            _SEARCH_ITEMS.append((r.key, f"{r.title}  ·  {r.category}  ·  {words}", r.description,
+                                  recipes.category_icon(r.category), i))
+    return _SEARCH_ITEMS
+
+
+def filtered_recipes(s):
+    """Recipes for the sidebar list: search text (titles, tags, descriptions), category and level."""
+    found = recipes.search(s.recipe_query) if s.recipe_query.strip() else list(recipes.RECIPES)
+    if s.recipe_category != "ALL":
+        found = [r for r in found if r.category == s.recipe_category]
+    if s.recipe_level != "ALL":
+        found = [r for r in found if recipes.level(r) == s.recipe_level]
+    return found
 
 
 def _ref_items(self, context):
@@ -266,6 +310,18 @@ class FORMULA_PG_Settings(PropertyGroup):
         name="Corner", items=[("RIGHT", "Right", ""), ("LEFT", "Left", "")], default="RIGHT",
         update=lambda self, ctx: tag_redraw_node_editors())
     preset_name: StringProperty(name="Preset Name", default="")
+    recipe_query: StringProperty(
+        name="Search Recipes",
+        description="Type what you want — 'grass', 'twist', 'smoke', a Houdini SOP name like 'mountain'",
+        default="", options={"TEXTEDIT_UPDATE"})
+    recipe_category: EnumProperty(name="Category", items=_category_items)
+    recipe_level: EnumProperty(
+        name="Level",
+        items=[("ALL", "Any level", "Show every recipe"),
+               ("Beginner", "Beginner", "Short scripts that work on any mesh"),
+               ("Intermediate", "Intermediate", "Loops, inputs to pick, more parameters"),
+               ("Advanced", "Advanced", "Simulations, volumes, Blender 5.3 solvers")],
+        default="ALL")
     script_origin: StringProperty(default="")   # "group:<name>" when the script came from that group
 
 
@@ -458,7 +514,8 @@ class FORMULA_OT_LoadRecipe(Operator):
         s = settings(context)
         set_script_text(s, r.script, backup="before loading a recipe")
         extra = f" — needs {', '.join(r.needs)}" if r.needs else ""
-        set_status(s, "INFO", f"Loaded recipe: {r.title}{extra}")
+        set_status(s, "INFO", f"Loaded recipe: {r.title}{extra}. Next: Generate from Script builds it "
+                              f"(or use + next to a recipe to add it straight to the selected object)")
         return {"FINISHED"}
 
 
@@ -898,6 +955,123 @@ class FORMULA_OT_OpenPrefs(Operator):
 #  Menus & panels
 # ═════════════════════════════════════════════════════════════════════════════
 
+class FORMULA_OT_SearchRecipes(Operator):
+    bl_idname = "node.formula_search_recipes"
+    bl_label = "Search Recipes"
+    bl_description = "Find a recipe by typing — names, categories and keywords"
+    bl_property = "recipe"
+    bl_options = {"REGISTER", "UNDO"}
+
+    recipe: EnumProperty(items=_search_items)
+
+    def invoke(self, context, event):
+        context.window_manager.invoke_search_popup(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        area = getattr(context, "area", None)
+        if area is not None and area.type == "VIEW_3D" and FORMULA_OT_ApplyRecipe.poll(context):
+            return bpy.ops.node.formula_apply_recipe(key=self.recipe)
+        return bpy.ops.node.formula_load_recipe(key=self.recipe)
+
+
+class FORMULA_OT_ClearRecipeSearch(Operator):
+    bl_idname = "node.formula_clear_recipe_search"
+    bl_label = "Reset Filters"
+    bl_description = "Clear the search and show every category and level again"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        s = settings(context)
+        s.recipe_query = ""
+        s.recipe_category = "ALL"
+        s.recipe_level = "ALL"
+        return {"FINISHED"}
+
+
+class FORMULA_OT_ApplyRecipe(Operator):
+    bl_idname = "node.formula_apply_recipe"
+    bl_label = "Add to Selected Object"
+    bl_description = ("One click: build this recipe as a new modifier on the selected object "
+                      "(and load its script so you can read and change it)")
+    bl_options = {"REGISTER", "UNDO"}
+
+    key: StringProperty()
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.view_layer.objects.active if context.view_layer else None
+        if ob is None or ob.type not in ("MESH", "CURVES", "CURVE", "POINTCLOUD", "VOLUME", "EMPTY"):
+            cls.poll_message_set("Select a mesh (or curve) object first — click it in the viewport")
+            return False
+        return True
+
+    def execute(self, context):
+        from . import api
+        r = recipes.BY_KEY.get(self.key)
+        if r is None:
+            return {"CANCELLED"}
+        ob = context.view_layer.objects.active
+        s = settings(context)
+        set_script_text(s, r.script, backup="before loading a recipe", origin="recipe:" + r.key)
+        info = api.build_group(r.script, name=r.title, object_name=ob.name)
+        if not info.get("ok"):
+            set_status(s, "ERROR", info.get("error", "couldn't build"))
+            self.report({"ERROR"}, info.get("error", "couldn't build"))
+            return {"CANCELLED"}
+        s.script_origin = "group:" + info["group"]
+        space = geo_space(context)
+        if space is not None and info.get("modifier"):
+            try:
+                ob.modifiers.active = ob.modifiers[info["modifier"]]
+            except (KeyError, AttributeError, TypeError):
+                pass
+        msg = f"Added '{info['group']}' to {ob.name}. Sliders: Modifier tab (wrench icon)"
+        if "@Cd" in r.script and show_colors_in_viewport(context):
+            msg += ". Viewport now shows colours"
+        if r.needs:
+            msg += f". It needs: {', '.join(r.needs)}"
+        set_status(s, "WARNING" if r.needs else "INFO", msg)
+        self.report({"INFO"}, msg)
+        return {"FINISHED"}
+
+
+def show_colors_in_viewport(context):
+    """Colour recipes write Cd, which Solid shading ignores by default. Switch Solid viewports in this
+    window to show the colour attribute so a beginner actually sees the result. Returns True if changed."""
+    changed = False
+    screen = getattr(context, "screen", None) or getattr(context.window, "screen", None)
+    for area in (screen.areas if screen else ()):
+        if area.type != "VIEW_3D":
+            continue
+        sh = area.spaces.active.shading
+        if sh.type == "SOLID" and sh.color_type != "VERTEX":
+            sh.color_type = "VERTEX"     # "Attribute" in the UI: shows the active colour attribute
+            changed = True
+            area.tag_redraw()
+    return changed
+
+
+LEVEL_WORD = {"Beginner": "easy", "Intermediate": "medium", "Advanced": "advanced"}
+
+
+def _recipe_row(layout, r, apply_on_click=False):
+    row = layout.row(align=True)
+    have = tuple(bpy.app.version[:3]) >= r.blender
+    row.enabled = have
+    row.label(text="", icon=recipes.category_icon(r.category))
+    text = r.title if have else f"{r.title} ({r.blender[0]}.{r.blender[1]}+)"
+    # in the 3D viewport there's no script editor to look at, so the name applies too
+    op = row.operator("node.formula_apply_recipe" if apply_on_click else "node.formula_load_recipe",
+                      text=text, emboss=True)
+    op.key = r.key
+    sub = row.row(align=True)
+    sub.ui_units_x = 3.0
+    sub.alignment = "RIGHT"
+    sub.label(text=LEVEL_WORD[recipes.level(r)])
+    row.operator("node.formula_apply_recipe", text="", icon="ADD").key = r.key
+
+
 class FORMULA_MT_Examples(Menu):
     bl_idname = "FORMULA_MT_examples"
     bl_label = "Examples"
@@ -926,7 +1100,7 @@ class FORMULA_MT_Recipes(Menu):
             if not items:
                 continue
             col = flow.column()
-            col.label(text=cat)
+            col.label(text=cat, icon=recipes.category_icon(cat))
             for r in items:
                 ok = have >= r.blender
                 row = col.row()
@@ -976,18 +1150,128 @@ class FORMULA_PT_Panel(_PanelBase, Panel):
             row.label(text=f"Updates: {tgt.name}", icon="NODETREE")
             row.operator("node.formula_load_active", text="Edit", icon="GREASEPENCIL")
 
-        box = layout.box()
-        box.label(text="Quick Formula", icon="SYNTAX_ON")
-        box.prop(s, "formula", text="")
-        row = box.row(align=True)
+
+
+class FORMULA_PT_QuickFormula(_PanelBase, Panel):
+    bl_label = "Quick Formula (one line)"
+    bl_idname = "FORMULA_PT_quick"
+    bl_parent_id = "FORMULA_PT_panel"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw_header(self, context):
+        self.layout.label(icon="SYNTAX_ON")
+
+    def draw(self, context):
+        layout = self.layout
+        s = settings(context)
+        layout.prop(s, "formula", text="")
+        row = layout.row(align=True)
         row.prop(s, "output_type", text="")
         row.operator("node.formula_check", text="", icon="VIEWZOOM").target = "FORMULA"
-        box.operator("node.formula_generate", icon="NODETREE")
+        layout.operator("node.formula_generate", icon="NODETREE")
 
+
+class FORMULA_PT_Options(_PanelBase, Panel):
+    bl_label = "Build Options"
+    bl_idname = "FORMULA_PT_options"
+    bl_parent_id = "FORMULA_PT_panel"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        s = settings(context)
         col = layout.column(align=True)
         col.prop(s, "group_name")
         col.prop(s, "auto_add")
         col.prop(s, "replace_active")
+
+
+class FORMULA_PT_Recipes(_PanelBase, Panel):
+    bl_label = "Recipes"
+    bl_idname = "FORMULA_PT_recipes"
+    bl_parent_id = "FORMULA_PT_panel"
+
+    def draw_header(self, context):
+        self.layout.label(icon="ASSET_MANAGER")
+
+    def draw_header_preset(self, context):
+        self.layout.operator("node.formula_search_recipes", text="", icon="VIEWZOOM", emboss=False)
+
+    def draw(self, context):
+        draw_recipe_browser(self.layout, settings(context))
+
+
+class FORMULA_PT_ViewRecipes(Panel):
+    """The same recipe browser in the 3D viewport sidebar — where beginners already are."""
+    bl_label = "Formula Recipes"
+    bl_idname = "FORMULA_PT_view_recipes"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Formula"
+
+    def draw_header(self, context):
+        self.layout.label(icon="ASSET_MANAGER")
+
+    def draw_header_preset(self, context):
+        self.layout.operator("node.formula_search_recipes", text="", icon="VIEWZOOM", emboss=False)
+
+    def draw(self, context):
+        layout = self.layout
+        s = settings(context)
+        ob = context.view_layer.objects.active
+        if ob is None or ob.type not in ("MESH", "CURVES", "CURVE", "POINTCLOUD", "VOLUME", "EMPTY"):
+            box = layout.box()
+            box.alert = True
+            box.label(text="Select a mesh first, then click a recipe", icon="RESTRICT_SELECT_OFF")
+        elif s.status:
+            box = layout.box()
+            icon = {"INFO": "CHECKMARK", "WARNING": "ERROR", "ERROR": "CANCEL"}[s.status_level]
+            col = box.column(align=True)
+            col.alert = s.status_level == "ERROR"
+            _wrap(col, s.status, icon, width=_chars(context))
+        draw_recipe_browser(layout, s, apply_on_click=True)
+        layout.separator()
+        col = layout.column(align=True)
+        _wrap(col, "Click a recipe to add it to the selected object. Change it with the sliders in "
+                   "the Modifier tab (wrench icon). To write your own, open the Geometry Nodes "
+                   "workspace and press N.", "INFO", width=_chars(context))
+
+
+def draw_recipe_browser(layout, s, apply_on_click=False):
+    row = layout.row(align=True)
+    row.prop(s, "recipe_query", text="", icon="VIEWZOOM", placeholder="Search: grass, twist, smoke, mountain…")
+    if s.recipe_category != "ALL" or s.recipe_level != "ALL":
+        row.operator("node.formula_clear_recipe_search", text="", icon="LOOP_BACK")
+    row = layout.row(align=True)
+    row.prop(s, "recipe_category", text="")
+    row.prop(s, "recipe_level", text="")
+
+    if not s.recipe_query.strip() and s.recipe_category == "ALL" and s.recipe_level == "ALL":
+        box = layout.box()
+        box.label(text="Start here — works on any mesh", icon="SOLO_ON")
+        col = box.column(align=True)
+        for key in recipes.START_HERE:
+            _recipe_row(col, recipes.BY_KEY[key], apply_on_click)
+        mine = presets.load()
+        if mine:
+            box = layout.box()
+            box.label(text="My Presets", icon="USER")
+            col = box.column(align=True)
+            for d in mine[:6]:
+                col.operator("node.formula_load_preset", text=d["name"], icon="USER").name = d["name"]
+        layout.label(text="Type above, or pick a category", icon="INFO")
+        return
+    found = filtered_recipes(s)
+    if not found:
+        col = layout.column(align=True)
+        col.label(text="Nothing found — try a simpler word", icon="ERROR")
+        col.label(text="e.g. noise, scatter, colour, wave, curve", icon="BLANK1")
+        return
+    col = layout.column(align=True)
+    for r in found[:14]:
+        _recipe_row(col, r, apply_on_click)
+    if len(found) > 14:
+        layout.label(text=f"+{len(found) - 14} more — narrow the search", icon="INFO")
 
 
 class FORMULA_PT_Script(_PanelBase, Panel):
@@ -1258,7 +1542,9 @@ class FORMULA_PT_MCP(_PanelBase, Panel):
 
 def _chars(context):
     width = context.region.width if context.region else 300
-    return max(20, int(width / (7.0 * max(context.preferences.system.ui_scale, 0.5))))
+    scale = max(context.preferences.system.ui_scale, 0.5)
+    # ~8 px per character plus room for the icon and panel margins (measured on 5.3, retina and not)
+    return max(18, int((width - 30 * scale) / (8.2 * scale)))
 
 
 def _wrap(layout, text, icon, width=40):
@@ -1301,8 +1587,15 @@ classes = (
     FORMULA_MT_DeletePreset,
     FORMULA_MT_Examples,
     FORMULA_MT_Recipes,
+    FORMULA_OT_SearchRecipes,
+    FORMULA_OT_ApplyRecipe,
+    FORMULA_OT_ClearRecipeSearch,
     FORMULA_PT_Panel,
+    FORMULA_PT_Recipes,
+    FORMULA_PT_ViewRecipes,
     FORMULA_PT_Script,
+    FORMULA_PT_QuickFormula,
+    FORMULA_PT_Options,
     FORMULA_PT_AI,
     FORMULA_OT_MCPConnectClaude,
     FORMULA_OT_MCPDisconnectClaude,
