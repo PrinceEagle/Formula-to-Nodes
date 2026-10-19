@@ -42,10 +42,10 @@ except ImportError:      # mcp_server.py imports the pure-Python modules outside
 if bpy is not None:
     if "ui" in locals():
         import importlib
-        for _m in (core, lang, caps, libs, funcs_math, funcs_noise, funcs_geo, funcs_xform, funcs_text, funcs_lists, funcs_params, geo_ops, compiler, layout, ramps, ai, examples, recipes, build, decompile, mcp_setup, ui, api):  # noqa: F821
+        for _m in (core, lang, caps, libs, funcs_math, funcs_noise, funcs_geo, funcs_xform, funcs_text, funcs_lists, funcs_params, geo_ops, compiler, layout, ramps, ai, examples, recipes, build, decompile, mcp_setup, presets, viewer, ui, api):  # noqa: F821
             importlib.reload(_m)
     else:
-        from . import (core, lang, caps, libs, funcs_math, funcs_noise, funcs_geo, funcs_xform, funcs_text, funcs_lists, funcs_params, geo_ops, compiler, layout, ramps, ai, examples, recipes, build, decompile, mcp_setup, ui, api)  # noqa: F401
+        from . import (core, lang, caps, libs, funcs_math, funcs_noise, funcs_geo, funcs_xform, funcs_text, funcs_lists, funcs_params, geo_ops, compiler, layout, ramps, ai, examples, recipes, build, decompile, mcp_setup, presets, viewer, ui, api)  # noqa: F401
 
 
 def register():

@@ -10,7 +10,7 @@ from bpy.types import AddonPreferences, Menu, Operator, Panel, PropertyGroup
 
 import sys
 
-from . import ai, build, caps, compiler, decompile, examples, libs, mcp_setup, recipes
+from . import ai, build, caps, compiler, decompile, examples, libs, mcp_setup, presets, recipes, viewer
 from .lang import FormulaError
 
 ADDON_ID = __package__
@@ -44,8 +44,28 @@ def script_text(s):
     return "\n".join(line.text for line in s.script_lines)
 
 
-def set_script_text(s, text):
+RECOVERY_TEXT = "Formula Recovery"
+
+
+def backup_script(s, reason):
+    """Keep the script that's about to be replaced in a 'Formula Recovery' text (newest on top)."""
+    old = script_text(s)
+    if not old.strip():
+        return
+    t = bpy.data.texts.get(RECOVERY_TEXT) or bpy.data.texts.new(RECOVERY_TEXT)
+    prev = t.as_string()
+    if prev.startswith(f"// ── {reason}") and old in prev[:len(old) + 200]:
+        return
+    stamp = __import__("time").strftime("%H:%M:%S")
+    t.from_string(f"// ── {reason} · {stamp} ──\n{old.rstrip()}\n\n" + prev[:200_000])
+
+
+def set_script_text(s, text, backup=None, origin=""):
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if backup and text != script_text(s):
+        backup_script(s, backup)
+    s.script_origin = origin
+    viewer.invalidate()
     if s.script_source == "TEXT":
         if s.script_text is None:
             s.script_text = bpy.data.texts.new("Formula Script")
@@ -91,6 +111,37 @@ def compile_options():
     return {"target": caps.from_blender(bpy), "resolver": libs.make_resolver(_text_lookup)}
 
 
+def rebuild_risks(context, space, source, mode, output):
+    """Reasons to ask before building: things the user could lose. [] when it's safe."""
+    s = settings(context)
+    target = active_formula_group(space) if s.replace_active else None
+    if target is None:
+        return []
+    tree = target.node_tree
+    risks = []
+    if mode == "SCRIPT" and s.script_origin != "group:" + tree.name and tree.get(build.SOURCE_KEY, "") != source:
+        risks.append(f"This replaces the selected group '{tree.name}' with a different script "
+                     f"(deselect it to make a new group instead)")
+    if build.hand_edited(tree):
+        risks.append(f"'{tree.name}' was edited by hand since it was built — those node edits will be replaced")
+    try:
+        result = compiler.compile_source(source, mode, output, **compile_options())
+    except FormulaError:
+        return risks
+    for name, n in build.broken_links(tree, result):
+        risks.append(f"Socket '{name}' goes away — {n} link{'s' if n != 1 else ''} will be cut")
+    return risks
+
+
+def confirm_risks(op, context, event, source, mode, output):
+    risks = rebuild_risks(context, geo_space(context), source, mode, output)
+    if not risks:
+        return op.execute(context)
+    return context.window_manager.invoke_confirm(op, event, title="Rebuild the group?",
+                                                 message="\n".join(risks), confirm_text="Rebuild",
+                                                 icon="WARNING")
+
+
 def compile_and_build(context, space, source, mode, output, report):
     """Compile, then rebuild the active formula group or add a new one.
     Returns True on success. All user feedback goes through status + report."""
@@ -124,6 +175,8 @@ def compile_and_build(context, space, source, mode, output, report):
         report({"ERROR"}, f"Build failed: {e}")
         return False
 
+    s.script_origin = "group:" + tree.name if mode == "SCRIPT" else s.script_origin
+    viewer.invalidate()
     msg = f"{verb} '{tree.name}' ({result.node_count} nodes)"
     if result.notes:
         set_status(s, "WARNING", msg + " — " + " | ".join(result.notes))
@@ -187,6 +240,22 @@ class FORMULA_PG_Settings(PropertyGroup):
     ai_log: StringProperty(default="")
 
     ref_category: EnumProperty(name="Category", items=_ref_items)
+
+    show_viewer: BoolProperty(
+        name="Live Viewer",
+        description="Draw the node your script becomes in the node editor — inputs, outputs, errors — "
+                    "updated as you type",
+        default=True, update=lambda self, ctx: (viewer.invalidate(), tag_redraw_node_editors()))
+    viewer_values: BoolProperty(
+        name="Values",
+        description="Also show min / average / max of the attributes the script writes, read from the "
+                    "active object (like a quick look at the spreadsheet)",
+        default=True, update=lambda self, ctx: (viewer.invalidate(), tag_redraw_node_editors()))
+    viewer_corner: EnumProperty(
+        name="Corner", items=[("RIGHT", "Right", ""), ("LEFT", "Left", "")], default="RIGHT",
+        update=lambda self, ctx: tag_redraw_node_editors())
+    preset_name: StringProperty(name="Preset Name", default="")
+    script_origin: StringProperty(default="")   # "group:<name>" when the script came from that group
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -258,6 +327,10 @@ class FORMULA_OT_Generate(_GeoEditorOp, Operator):
     bl_description = "Build (or update) a node group from the one-line formula"
     bl_options = {"REGISTER", "UNDO"}
 
+    def invoke(self, context, event):
+        s = settings(context)
+        return confirm_risks(self, context, event, s.formula, "FORMULA", s.output_type)
+
     def execute(self, context):
         s = settings(context)
         ok = compile_and_build(context, geo_space(context), s.formula, "FORMULA", s.output_type, self.report)
@@ -269,6 +342,9 @@ class FORMULA_OT_GenerateScript(_GeoEditorOp, Operator):
     bl_label = "Generate from Script"
     bl_description = "Build (or update) a node group from the script"
     bl_options = {"REGISTER", "UNDO"}
+
+    def invoke(self, context, event):
+        return confirm_risks(self, context, event, script_text(settings(context)), "SCRIPT", "AUTO")
 
     def execute(self, context):
         s = settings(context)
@@ -325,7 +401,7 @@ class FORMULA_OT_LoadActive(_GeoEditorOp, Operator):
             s.formula = src
             s.output_type = tree.get(build.OUTPUT_KEY, "AUTO")
         else:
-            set_script_text(s, src)
+            set_script_text(s, src, backup="before Edit Selected Group", origin="group:" + tree.name)
         set_status(s, "INFO", f"Loaded '{tree.name}' — edit, then Generate to update it in place")
         return {"FINISHED"}
 
@@ -347,7 +423,7 @@ class FORMULA_OT_LoadExample(Operator):
         if not ex:
             return {"CANCELLED"}
         s = settings(context)
-        set_script_text(s, ex[3])
+        set_script_text(s, ex[3], backup="before loading an example")
         set_status(s, "INFO", f"Loaded example: {ex[1]}")
         return {"FINISHED"}
 
@@ -369,7 +445,7 @@ class FORMULA_OT_LoadRecipe(Operator):
         if r is None:
             return {"CANCELLED"}
         s = settings(context)
-        set_script_text(s, r.script)
+        set_script_text(s, r.script, backup="before loading a recipe")
         extra = f" — needs {', '.join(r.needs)}" if r.needs else ""
         set_status(s, "INFO", f"Loaded recipe: {r.title}{extra}")
         return {"FINISHED"}
@@ -397,7 +473,7 @@ class FORMULA_OT_ConvertToScript(_GeoEditorOp, Operator):
             self.report({"ERROR"}, f"Couldn't convert '{tree.name}': {e}")
             return {"CANCELLED"}
         s = settings(context)
-        set_script_text(s, script)
+        set_script_text(s, script, backup="before Convert Nodes to Script")
         for n in notes[:5]:
             self.report({"WARNING"}, n)
         msg = f"Converted '{tree.name}'" + (f" — {len(notes)} note(s), see the Info log" if notes else "")
@@ -446,7 +522,7 @@ class FORMULA_OT_ScriptPaste(Operator):
             self.report({"WARNING"}, "Clipboard is empty")
             return {"CANCELLED"}
         s = settings(context)
-        set_script_text(s, ai.extract_script(clip) if "```" in clip else clip)
+        set_script_text(s, ai.extract_script(clip) if "```" in clip else clip, backup="before Paste")
         return {"FINISHED"}
 
 
@@ -468,9 +544,171 @@ class FORMULA_OT_ScriptClear(Operator):
 
     def execute(self, context):
         s = settings(context)
-        set_script_text(s, "")
+        set_script_text(s, "", backup="before Clear")
         set_status(s, "INFO", "")
         return {"FINISHED"}
+
+
+# ── text editor workflow, presets ───────────────────────────────────────────
+
+def _geo_area(window):
+    for a in window.screen.areas:
+        if a.type == "NODE_EDITOR" and a.spaces.active.tree_type == "GeometryNodeTree":
+            return a
+    return None
+
+
+def _ensure_text(s):
+    """Switch the script to a Text datablock (keeping what's written) and return it."""
+    if s.script_source != "TEXT" or s.script_text is None:
+        src = script_text(s)
+        if s.script_text is None:
+            s.script_text = bpy.data.texts.new("Formula Script")
+        if src.strip() or not s.script_text.as_string().strip():
+            s.script_text.from_string(src)
+        s.script_source = "TEXT"
+    return s.script_text
+
+
+class FORMULA_OT_EditInTextEditor(_GeoEditorOp, Operator):
+    bl_idname = "node.formula_edit_in_text_editor"
+    bl_label = "Open in Text Editor"
+    bl_description = ("Write the script in a Text Editor next to the nodes: a real code editor with "
+                      "line numbers. The Live Viewer updates as you type; Ctrl+Enter builds")
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        s = settings(context)
+        text = _ensure_text(s)
+        screen = context.window.screen
+        for a in screen.areas:
+            if a.type == "TEXT_EDITOR":
+                a.spaces.active.text = text
+                self.report({"INFO"}, "Script is in the Text Editor — Ctrl+Enter there builds")
+                return {"FINISHED"}
+        area = context.area
+        before = set(a.as_pointer() for a in screen.areas)
+        region = next((r for r in area.regions if r.type == "WINDOW"), context.region)
+        with context.temp_override(area=area, region=region):
+            bpy.ops.screen.area_split(direction="VERTICAL", factor=0.4)
+        new = [a for a in screen.areas if a.as_pointer() not in before]
+        pair = new + [area]
+        left = min(pair, key=lambda a: a.x)
+        left.type = "TEXT_EDITOR"
+        sp = left.spaces.active
+        sp.text = text
+        sp.show_line_numbers = True
+        sp.show_syntax_highlight = True
+        sp.show_word_wrap = False
+        viewer.invalidate()
+        self.report({"INFO"}, "Write on the left; the viewer shows the node on the right. Ctrl+Enter builds")
+        return {"FINISHED"}
+
+
+class FORMULA_OT_BuildFromText(Operator):
+    bl_idname = "text.formula_build"
+    bl_label = "Build Formula"
+    bl_description = "Build (or update) the node group from this text, into the Geometry Node Editor"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        sp = context.space_data
+        return sp is not None and sp.type == "TEXT_EDITOR" and sp.text is not None
+
+    def invoke(self, context, event):
+        s = settings(context)
+        text = context.space_data.text
+        if s.script_text is not text or s.script_source != "TEXT":
+            s.script_text = text
+            s.script_source = "TEXT"
+        area = _geo_area(context.window)
+        if area is None:
+            self.report({"ERROR"}, "Open a Geometry Node Editor to build into")
+            return {"CANCELLED"}
+        region = next(r for r in area.regions if r.type == "WINDOW")
+        with context.temp_override(area=area, region=region, space_data=area.spaces.active):
+            return bpy.ops.node.formula_generate_script("INVOKE_DEFAULT")
+
+    def execute(self, context):
+        return self.invoke(context, None)
+
+
+class FORMULA_OT_SavePreset(Operator):
+    bl_idname = "node.formula_save_preset"
+    bl_label = "Save as Preset"
+    bl_description = "Save this script under Recipes › My Presets, available in every file"
+
+    name: StringProperty(name="Name", default="")
+
+    def invoke(self, context, event):
+        s = settings(context)
+        if not script_text(s).strip():
+            self.report({"ERROR"}, "The script is empty")
+            return {"CANCELLED"}
+        if not self.name:
+            first = next((ln.strip(" /#") for ln in script_text(s).splitlines() if ln.strip().startswith(("//", "#"))), "")
+            self.name = first[:40] or s.group_name
+        return context.window_manager.invoke_props_dialog(self, title="Save as Preset", confirm_text="Save")
+
+    def execute(self, context):
+        s = settings(context)
+        exists = presets.get(self.name.strip()) is not None
+        try:
+            name = presets.save(self.name, script_text(s))
+        except (ValueError, OSError) as e:
+            self.report({"ERROR"}, f"Couldn't save the preset: {e}")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"{'Updated' if exists else 'Saved'} preset '{name}' (Recipes › My Presets)")
+        return {"FINISHED"}
+
+
+class FORMULA_OT_LoadPreset(Operator):
+    bl_idname = "node.formula_load_preset"
+    bl_label = "Load Preset"
+    bl_options = {"REGISTER", "UNDO"}
+
+    name: StringProperty()
+
+    @classmethod
+    def description(cls, context, props):
+        d = presets.get(props.name)
+        return f"Your preset, saved {d['saved']}" if d else ""
+
+    def execute(self, context):
+        d = presets.get(self.name)
+        if d is None:
+            return {"CANCELLED"}
+        s = settings(context)
+        set_script_text(s, d["script"], backup="before loading a preset", origin="preset:" + self.name)
+        set_status(s, "INFO", f"Loaded preset: {self.name}")
+        return {"FINISHED"}
+
+
+class FORMULA_OT_DeletePreset(Operator):
+    bl_idname = "node.formula_delete_preset"
+    bl_label = "Delete Preset"
+    bl_description = "Remove this preset from My Presets (a .bak of the library is kept)"
+
+    name: StringProperty()
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event, title=f"Delete preset '{self.name}'?",
+                                                     confirm_text="Delete", icon="TRASH")
+
+    def execute(self, context):
+        presets.delete(self.name)
+        self.report({"INFO"}, f"Deleted preset '{self.name}'")
+        return {"FINISHED"}
+
+
+class FORMULA_MT_DeletePreset(Menu):
+    bl_idname = "FORMULA_MT_delete_preset"
+    bl_label = "Delete Preset"
+
+    def draw(self, context):
+        for d in presets.load():
+            self.layout.operator("node.formula_delete_preset", text=d["name"], icon="TRASH").name = d["name"]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -577,7 +815,7 @@ class FORMULA_OT_AIGenerate(_GeoEditorOp, Operator):
             tag_redraw_node_editors()
             return {"CANCELLED"}
 
-        set_script_text(s, job.script)
+        set_script_text(s, job.script, backup="before AI Assist")
         if job.error:
             set_status(s, "ERROR", f"AI script still has an error after {job.attempt} attempts — {job.error}",
                        job.error_line or -1)
@@ -660,6 +898,13 @@ class FORMULA_MT_Recipes(Menu):
     def draw(self, context):
         flow = self.layout.column_flow(columns=4)
         have = tuple(bpy.app.version[:3])
+        mine = presets.load()
+        if mine:
+            col = flow.column()
+            col.label(text="My Presets")
+            for d in mine:
+                col.operator("node.formula_load_preset", text=d["name"], icon="USER").name = d["name"]
+            col.menu("FORMULA_MT_delete_preset", text="Delete…", icon="TRASH")
         for cat, items in recipes.by_category().items():
             if not items:
                 continue
@@ -701,6 +946,13 @@ class FORMULA_PT_Panel(_PanelBase, Panel):
             col.alert = s.status_level == "ERROR"
             _wrap(col, s.status, icon, width=_chars(context))
 
+        row = layout.row(align=True)
+        row.prop(s, "show_viewer", toggle=True, icon="HIDE_OFF" if s.show_viewer else "HIDE_ON")
+        sub = row.row(align=True)
+        sub.active = s.show_viewer
+        sub.prop(s, "viewer_values", toggle=True, icon="SPREADSHEET")
+        sub.prop(s, "viewer_corner", text="")
+
         node = active_formula_group(geo_space(context))
         if node:
             row = layout.row(align=True)
@@ -736,7 +988,13 @@ class FORMULA_PT_Script(_PanelBase, Panel):
         layout.row().prop(s, "script_source", expand=True)
         if s.script_source == "TEXT":
             layout.template_ID(s, "script_text", new="text.new", open="text.open")
+            row = layout.row(align=True)
+            row.operator("node.formula_edit_in_text_editor", text="Show Text Editor", icon="TEXT")
+            sub = layout.column(align=True)
+            sub.scale_y = 0.8
+            sub.label(text="Ctrl+Enter in the Text Editor builds", icon="INFO")
         else:
+            layout.operator("node.formula_edit_in_text_editor", icon="TEXT")
             row = layout.row(align=True)
             row.operator("node.formula_script_paste", text="Paste", icon="PASTEDOWN")
             row.operator("node.formula_script_copy", text="Copy", icon="COPYDOWN")
@@ -754,7 +1012,9 @@ class FORMULA_PT_Script(_PanelBase, Panel):
         row.scale_y = 1.3
         row.operator("node.formula_check", text="", icon="VIEWZOOM").target = "SCRIPT"
         row.operator("node.formula_generate_script", icon="NODETREE")
-        layout.operator("node.formula_convert_to_script", icon="TEXT")
+        row = layout.row(align=True)
+        row.operator("node.formula_convert_to_script", icon="TEXT")
+        row.operator("node.formula_save_preset", text="", icon="BOOKMARKS")
 
 
 class FORMULA_PT_AI(_PanelBase, Panel):
@@ -1016,6 +1276,12 @@ classes = (
     FORMULA_OT_AICancel,
     FORMULA_OT_AICopyPrompt,
     FORMULA_OT_OpenPrefs,
+    FORMULA_OT_EditInTextEditor,
+    FORMULA_OT_BuildFromText,
+    FORMULA_OT_SavePreset,
+    FORMULA_OT_LoadPreset,
+    FORMULA_OT_DeletePreset,
+    FORMULA_MT_DeletePreset,
     FORMULA_MT_Examples,
     FORMULA_MT_Recipes,
     FORMULA_PT_Panel,
@@ -1030,13 +1296,30 @@ classes = (
 )
 
 
+_keymaps = []
+
+
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.formula_settings = PointerProperty(type=FORMULA_PG_Settings)
+    kc = bpy.context.window_manager.keyconfigs.addon
+    if kc is not None:
+        km = kc.keymaps.new(name="Text", space_type="TEXT_EDITOR")
+        for ctrl, oskey in ((True, False), (False, True)):
+            kmi = km.keymap_items.new("text.formula_build", "RET", "PRESS", ctrl=ctrl, oskey=oskey)
+            _keymaps.append((km, kmi))
+    viewer.register()
 
 
 def unregister():
+    viewer.unregister()
+    for km, kmi in _keymaps:
+        try:
+            km.keymap_items.remove(kmi)
+        except (ReferenceError, RuntimeError):
+            pass
+    _keymaps.clear()
     if _job is not None:
         _job.cancel()
     if hasattr(bpy.types.Scene, "formula_settings"):

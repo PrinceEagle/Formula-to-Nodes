@@ -17,6 +17,7 @@ OUTPUT_KEY = "ftn_output"
 VERSION_KEY = "ftn_version"
 RUNOVER_KEY = "ftn_runover"
 RAMP_KEY = "ftn_ramp"
+FP_KEY = "ftn_fingerprint"
 
 
 class BuildError(Exception):
@@ -25,6 +26,42 @@ class BuildError(Exception):
 
 def is_formula_group(tree):
     return tree is not None and getattr(tree, "bl_idname", "") == "GeometryNodeTree" and SOURCE_KEY in tree
+
+
+def fingerprint(tree):
+    """What the graph is (node types and wiring), ignoring where nodes sit — so moving nodes around
+    isn't an edit, but adding, deleting or rewiring one is."""
+    import hashlib
+    kinds = sorted(n.bl_idname for n in tree.nodes if n.bl_idname not in ("NodeFrame", "NodeReroute"))
+    wires = sorted(f"{l.from_node.bl_idname}.{l.from_socket.identifier}>{l.to_node.bl_idname}.{l.to_socket.identifier}"
+                   for l in tree.links)
+    return hashlib.md5(("|".join(kinds) + "#" + "|".join(wires)).encode()).hexdigest()
+
+
+def hand_edited(tree):
+    """True if someone changed the nodes since the add-on built them."""
+    return FP_KEY in tree and fingerprint(tree) != tree[FP_KEY]
+
+
+def broken_links(tree, result):
+    """Links into/out of uses of ``tree`` that would be cut because a socket disappears.
+    Returns [(socket name, number of links)]."""
+    keep = {(i.in_out, i.name) for i in result.iface}
+    gone = [it for it in tree.interface.items_tree
+            if getattr(it, "item_type", "") == "SOCKET" and (it.in_out, it.name) not in keep]
+    if not gone:
+        return []
+    count = {}
+    for ng in bpy.data.node_groups:
+        for n in getattr(ng, "nodes", ()):
+            if n.bl_idname != "GeometryNodeGroup" or n.node_tree is not tree:
+                continue
+            for it in gone:
+                socks = n.inputs if it.in_out == "INPUT" else n.outputs
+                sock = next((x for x in socks if x.identifier == it.identifier), None)
+                if sock is not None and sock.is_linked:
+                    count[it.name] = count.get(it.name, 0) + len(sock.links)
+    return sorted(count.items())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -430,6 +467,7 @@ def build_group(result, source, mode, output="AUTO", name="Formula", target=None
     tree[OUTPUT_KEY] = output
     tree[VERSION_KEY] = version
     tree[RUNOVER_KEY] = runover or getattr(result, "runover", "POINT")
+    tree[FP_KEY] = fingerprint(tree)
     has_geo = any(s.key == "out:Geometry" for s in result.iface)
     if hasattr(tree, "is_modifier"):
         tree.is_modifier = has_geo

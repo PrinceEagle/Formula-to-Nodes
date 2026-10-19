@@ -225,11 +225,12 @@ UNSUPPORTED = {
 # ═════════════════════════════════════════════════════════════════════════════
 
 class CompileResult:
-    def __init__(self, graph, iface, notes, mode, runover="POINT", ramps=(), target=None):
+    def __init__(self, graph, iface, notes, mode, runover="POINT", ramps=(), target=None, attrs=None):
         self.graph, self.iface, self.notes, self.mode = graph, iface, notes, mode
         self.runover = runover
         self.ramps = list(ramps)       # [(name, kind)] in first-use order
         self.target = target
+        self.attrs = dict(attrs or {})  # attribute name → (type, stored type, domain) written
 
     @property
     def node_count(self):
@@ -386,7 +387,8 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
                 self.note(f"parameter '{p.name}' isn't used by anything, so it was left out")
         live_ramps = {n.ramp[1] for n in self.g.nodes if n.ramp}
         ramps = [r for r in self.ramps if r[0] in live_ramps]
-        return CompileResult(self.g, iface, self.notes, mode, self.default_domain, ramps, self.target)
+        return CompileResult(self.g, iface, self.notes, mode, self.default_domain, ramps, self.target,
+                             getattr(self, "attr_info", {}))
 
     # ── bookkeeping ────────────────────────────────────────────────────────
     def _new_mark(self):
