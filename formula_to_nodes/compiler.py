@@ -170,6 +170,14 @@ NAMED_ATTR_TYPES = {"rest_position": VECTOR, "velocity": VECTOR, "orient": ROTAT
                     "pivot": VECTOR, "trans": VECTOR, "center": VECTOR, "fuel": FLOAT, "heat": FLOAT,
                     "flame": FLOAT, "Alpha_": FLOAT}
 # reading these without ever writing them is almost always a Houdini habit: say what Blender calls it
+def group_attr(name):
+    """Attribute that holds Houdini group ``name``: the name itself, unless that would collide with a
+    known attribute (@group_up must not become v@up) — then "group_<name>"."""
+    taken = set(VEX_ALIASES) | set(VEX_ALIASES.values()) | set(BUILTIN_ATTRS) | set(NAMED_ATTR_TYPES) \
+        | set(INDEX_ALIASES) | set(COUNT_ALIASES)
+    return f"group_{name}" if name in taken else name
+
+
 HOUDINI_ATTR_HINTS = {
     "class": "Houdini's Connectivity 'class' is @island here (built in, no node needed)",
     "name": "piece names: use @island for connected pieces, or an int attribute you set",
@@ -1718,9 +1726,9 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
             if write:
                 raise FormulaError("@TimeInc is read-only")
             return Attr("TimeInc", FLOAT, "timeinc", field=False)
-        if raw.startswith("group_") and len(raw) > 6 and prefix in ("", "i", "b"):
+        if raw.startswith("group_") and len(raw) > 6 and prefix in ("", "i"):
             # Houdini groups are bool attributes in Blender: @group_top ↔ b@top
-            return self.resolve_attr("b", raw[6:], write)
+            return self.resolve_attr("b", group_attr(raw[6:]), write)
         if raw in COUNT_ALIASES:
             return Attr(raw, INT, "count", field=False)
         name = VEX_ALIASES.get(raw, raw)
@@ -1788,6 +1796,8 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
                 if "deltatime" in c.reserved:
                     return c.reserved["deltatime"]
                 c = c.parent
+            self.note("@TimeInc outside simulate { } is one frame's length — values don't add up from frame "
+                      "to frame; put accumulating lines (f@age += @TimeInc) inside simulate { }")
             st = self.g.add("GeometryNodeInputSceneTime")
             sec, fr = Val(FLOAT, o=st.out("Seconds")), Val(FLOAT, o=st.out("Frame"))
             per = self.math("DIVIDE", sec, fr)          # seconds per frame = 1 / fps

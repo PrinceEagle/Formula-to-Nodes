@@ -223,16 +223,43 @@ def set_parameters(object_name, values, modifier=""):
     return out
 
 
+def _round(v):
+    if isinstance(v, float):
+        return round(v, 5)
+    if isinstance(v, (int, bool, str)) or v is None:
+        return v
+    try:
+        return [_round(x) for x in v]      # vectors, colours, matrix rows
+    except TypeError:
+        return str(v)
+
+
 def _value(d):
     for attr in ("vector", "color", "value"):
         if hasattr(d, attr):
-            v = getattr(d, attr)
-            if isinstance(v, float):
-                return round(v, 5)
-            if isinstance(v, (int, bool, str)):
-                return v
-            return [round(x, 5) for x in v]
+            return _round(getattr(d, attr))
     return None
+
+
+def _instance_xforms(comp, limit, elements):
+    """Readable translation / rotation (Euler, radians) / scale of the first instances."""
+    a = comp.attributes.get("instance_transform")
+    if a is None:
+        return None
+    n = len(a.data)
+    idx = [i for i in elements if 0 <= i < n] if elements else range(min(limit, n))
+    out = []
+    for i in idx:
+        m = a.data[i].value
+        try:
+            import mathutils
+            mm = mathutils.Matrix(m)
+            loc, rot, sca = mm.decompose()
+            out.append({"index": i, "position": _round(tuple(loc)), "rotation": _round(tuple(rot.to_euler())),
+                        "scale": _round(tuple(sca))})
+        except Exception:
+            out.append({"index": i, "matrix": _round(m)})
+    return out
 
 
 def _stats(a):
@@ -281,17 +308,26 @@ def _inspect_once(ob, attributes, limit, elements):
     dg = bpy.context.evaluated_depsgraph_get()
     gs = ob.evaluated_get(dg).evaluated_geometry()
     comps = {}
+    found = set()
     for comp_name, comp in _components(gs):
         attrs = {}
+        if comp_name == "instances":
+            xf = _instance_xforms(comp, limit, elements)
+            if xf is not None and (not attributes or {"orient", "rotation", "scale", "transform",
+                                                      "instance_transform"} & set(attributes)):
+                attrs["transforms"] = xf
+                found |= {"orient", "rotation", "scale", "transform", "instance_transform"}
         for a in comp.attributes:
-            if a.name.startswith("."):
+            if a.name.startswith(".") or a.name == "instance_transform":
                 continue
             if attributes and a.name not in attributes:
                 continue
+            found.add(a.name)
             data = a.data
             n = len(data)
             idx = [i for i in elements if 0 <= i < n] if elements else range(min(limit, n))
-            entry = {"domain": a.domain, "type": a.data_type, "count": n}
+            entry = {"domain": "INSTANCE" if comp_name == "instances" else a.domain, "type": a.data_type,
+                     "count": n}
             if elements:
                 entry["values"] = {str(i): _value(data[i]) for i in idx}
             else:
@@ -304,6 +340,9 @@ def _inspect_once(ob, attributes, limit, elements):
     vol = _volume(gs)
     if vol:
         comps["volume"] = vol
+    missing = [n for n in (attributes or []) if n not in found and n != "position"]
+    if missing:
+        comps["missing"] = missing
     # detail values live on the geometry as a bundle-like set of single values; read what we can
     del gs
     return comps
@@ -323,11 +362,23 @@ def inspect(object_name, attributes=None, limit=8, frames=None, elements=None):
     out = {"ok": True, "object": ob.name}
     if frames:
         keep = scene.frame_current
+        wanted = sorted({int(x) for x in frames})[:12]
         per = {}
+        sim = any(m.type == "NODES" and m.node_group is not None and any(
+            n.bl_idname == "GeometryNodeSimulationOutput" for n in m.node_group.nodes) for m in ob.modifiers)
         try:
-            for f in [int(x) for x in frames][:12]:
-                scene.frame_set(f)
-                per[str(f)] = _inspect_once(ob, attributes, limit, elements)
+            if sim:
+                # simulations only advance frame by frame: step from the start so the answer is right
+                start = min(scene.frame_start, wanted[0])
+                for f in range(start, min(wanted[-1], start + 600) + 1):
+                    scene.frame_set(f)
+                    if f in wanted:
+                        per[str(f)] = _inspect_once(ob, attributes, limit, elements)
+                out["note"] = f"simulation: stepped through frames {start}–{wanted[-1]} in order"
+            else:
+                for f in wanted:
+                    scene.frame_set(f)
+                    per[str(f)] = _inspect_once(ob, attributes, limit, elements)
         finally:
             scene.frame_set(keep)
         out["frames"] = per

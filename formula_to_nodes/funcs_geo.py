@@ -283,8 +283,9 @@ class GeoFuncs:
         group = self.str_const(node.args[1], f"{name}()'s group name").strip()
         if not group.isidentifier():
             raise FormulaError(f'{name}(): "{group}" isn\'t a valid group name (letters, digits, _)')
+        from .compiler import group_attr
         args = list(node.args)
-        args[1] = ast.Constant("b@" + group)
+        args[1] = ast.Constant("b@" + group_attr(group))
         return ast.Call(func=ast.Name(FUNCS[name].data["base"], ast.Load()), args=args[:4], keywords=[])
 
     def f_ingroup(self, node, name):

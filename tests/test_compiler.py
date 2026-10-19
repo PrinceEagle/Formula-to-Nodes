@@ -163,7 +163,10 @@ class TestErrorsAndNotes(unittest.TestCase):
         res = ok("#runover prim\nsetprimgroup(0, \"top\", @primnum, @N.z > 0.5);\n"
                  "f@x = inprimgroup(0, \"top\", @primnum) ? 1 : 0;")
         self.assertIn("top", res.attrs)
-        self.assertEqual(ok("#runover prim\n@group_up = @N.z > 0.7;").attrs["up"][0], "BOOL")
+        self.assertEqual(ok("#runover prim\n@group_top = @N.z > 0.7;").attrs["top"][0], "BOOL")
+        # a group named like a known attribute keeps its prefix, so it can't clobber v@up
+        attrs = ok("@group_up = 1;\nv@up = {1, 0, 0};").attrs
+        self.assertEqual((attrs["group_up"][0], attrs["up"][0]), ("BOOL", "VECTOR"))
         res = ok("f@w = @curveu;")
         notes = ok("f@k = @class * 2;").notes
         self.assertTrue(any("@island" in n for n in notes))

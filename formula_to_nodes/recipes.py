@@ -165,10 +165,13 @@ instance(chcoll("Collection"), i@variant);
       """
 // Houdini: Relax. A few iterations of pushing away from the nearest other point.
 float r = chf("radius", 0.1, min=0.001);
-repeat(chi("iterations", 10, min=1, max=100)) {
+repeat(chi("iterations", 20, min=1, max=200)) {
     int nb = nearpoint(0, @P);
     vector away = @P - point(0, "P", nb);
-    @P += normalize(away) * max(r - length(away), 0) * 0.5 * chf("strength", 1, min=0, max=1);
+    float d = length(away);
+    // two points on top of each other: split them in a random direction
+    vector dir = d > 0.000001 ? away / d : normalize(set(rand(@ptnum + iteration), rand(@ptnum + 7), 0) - 0.5);
+    @P += dir * max(r - d, 0) * 0.5 * chf("strength", 1, min=0, max=1);
 }
 """, tags=("houdini", "relax", "point relax", "even", "spread", "declump", "scatter"),
       test={"kind": "plane", "prelude": "scatter(200);"}),
@@ -194,6 +197,8 @@ simulate {
     @pscale = alive * chf("size", 0.02) * (1 - f@age / max(f@life, 0.001));
     if (f@age > f@life) removepoint(0, @ptnum);
 }
+// show only born particles (the unborn pool stays in the simulation, like POP Source's stream)
+if (@Time < f@birth) removepoint(0, @ptnum);
 """, tags=("houdini", "pop", "particles", "source", "emit", "age", "life", "curl", "drag", "simulation"),
       test={"kind": "plane", "frames": 3}),
 
