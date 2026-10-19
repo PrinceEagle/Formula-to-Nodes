@@ -150,9 +150,33 @@ class TestErrorsAndNotes(unittest.TestCase):
     def test_printf_needs_single_values(self):
         self.assertErr('printf("%g", @P.z);', "single values")
 
-    def test_notes(self):
-        res = ok("@mask = 1;")
-        self.assertTrue(any("type prefix" in n for n in res.notes))
+    def test_unprefixed_unknown_is_float_like_vex(self):
+        res = ok("@mask = 1;\nif (@mask > 0.5) f@x = 1;")
+        self.assertEqual(res.attrs["mask"][0], "FLOAT")
+        self.assertEqual(ok("@dead = 1;").attrs["dead"][0], "INT")
+        self.assertEqual(ok("@force = {0, 0, 1};").attrs["force"][0], "VECTOR")
+
+    def test_houdini_habits(self):
+        self.assertErr("f@t = $F / 24.0;", "@Frame")
+        self.assertErr("setprimgroup2(0, \"top\", @primnum, 1);", "unknown function")
+        self.assertErr("polybevel(0.02, 2);", "bevel(")
+        res = ok("#runover prim\nsetprimgroup(0, \"top\", @primnum, @N.z > 0.5);\n"
+                 "f@x = inprimgroup(0, \"top\", @primnum) ? 1 : 0;")
+        self.assertIn("top", res.attrs)
+        self.assertEqual(ok("#runover prim\n@group_up = @N.z > 0.7;").attrs["up"][0], "BOOL")
+        res = ok("f@w = @curveu;")
+        notes = ok("f@k = @class * 2;").notes
+        self.assertTrue(any("@island" in n for n in notes))
+        self.assertTrue(any("Z-up" in n for n in ok("v@g = {0, -9.8, 0};").notes))
+        self.assertTrue(any("no default" in n for n in ok('f@r = 1 / ch("radius");').notes))
+        ok("f@dt = @TimeInc;")
+        ok("simulate { f@age += @TimeInc; }")
+
+    def test_easing(self):
+        for fn in ("easein", "easeout", "easeinout", "easeoutback"):
+            ok(f"f@e = {fn}(@P.x, 3);")
+        ok("f@e = easeoutelastic(@P.x) + easeoutbounce(@P.x);")
+        self.assertEqual(ok("f@e = easein(0.5);").node_count, ok("f@e = 0.25;").node_count)
 
     def test_unused_parameter_note(self):
         res = ok('float unused = chf("unused", 1);\nf@x = 1;')

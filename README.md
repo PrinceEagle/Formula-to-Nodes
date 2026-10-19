@@ -1,4 +1,4 @@
-# Formula to Nodes — listing description (v2.1)
+# Formula to Nodes — listing description (v3.2)
 
 ## Stop wiring Math nodes by hand.
 
@@ -35,6 +35,31 @@ written one, it reads like the formula you'd write on paper.
 - **Tidy output** — constants are folded, repeated sub-expressions are shared, and the graph is
   laid out left to right with zones respected.
 - **Check before you build** — errors come back with line numbers and the bad line highlighted.
+
+## Live Viewer — see the node while you type
+
+A node-shaped card in the Geometry Node Editor shows what your script becomes, live: its
+outputs, every input with its default (grouped by panel), the node count — or the error, with the
+offending line. Below it, **live values**: min / average / max of every attribute the script
+writes, read from the active object at the current frame, plus NaN/inf warnings. Toggle it with
+**Viewer** / **Values** in the sidebar.
+
+**Open in Text Editor** puts a real code editor next to the nodes; the viewer follows your typing
+and **Ctrl+Enter** builds. Building while you're inside a Formula group updates that group in
+place. Before a rebuild could lose work — a different script going into the selected group, nodes
+you edited by hand, links that would be cut — it asks first. Every script you replace (loading a
+recipe, pasting, AI Assist) is kept in a *Formula Recovery* text. **Save as Preset** keeps your
+own scripts under *Recipes › My Presets* in every file.
+
+## Coming from Houdini
+
+Tested with Houdini artists. Unprefixed attributes are floats like in VEX; `@age @life @dead
+@force @TimeInc` keep their POP meanings; groups are bool attributes (`@group_top`,
+`inpointgroup`, `setprimgroup`); `@curveu` and `@class` map to Blender's equivalents; `$F` and
+Y-up gravity get a friendly note; `instance()` aligns +Z to `@N` and +Y to `v@up` like Copy to
+Points; easing functions are built in. A **From Houdini** recipe column covers Attribute
+Transfer, Group Expression, PolyExtrude, Connectivity, Sweep with a profile, Mountain, Peak,
+Measure, Attribute Noise, Copy to Points prep and Point Relax — named so you can find them.
 
 ## AI Assist
 

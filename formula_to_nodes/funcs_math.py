@@ -176,6 +176,17 @@ reg("fit01", "fit01(x, new_min, new_max)", "remap from 0..1", "Mapping & blendin
 reg("fit10", "fit10(x, new_min, new_max)", "remap from 1..0", "Mapping & blending", "f_fit", clamp=True, src=(1.0, 0.0))
 reg("fit11", "fit11(x, new_min, new_max)", "remap from -1..1", "Mapping & blending", "f_fit", clamp=True, src=(-1.0, 1.0))
 reg("smoothstep smooth", "NAME(edge0, edge1, x)", "0..1 smooth ramp", "Mapping & blending", "f_smoothstep")
+reg("easein", "easein(t [, power])", "ease in: slow start (t is clamped to 0..1, power 2 = quadratic)",
+    "Mapping & blending", "f_ease", kind="in")
+reg("easeout", "easeout(t [, power])", "ease out: slow finish", "Mapping & blending", "f_ease", kind="out")
+reg("easeinout", "easeinout(t [, power])", "ease in and out: slow start and finish", "Mapping & blending",
+    "f_ease", kind="inout")
+reg("easeoutback", "easeoutback(t [, overshoot])", "overshoots past 1 and settles back (overshoot 1.7)",
+    "Mapping & blending", "f_ease", kind="back")
+reg("easeoutelastic", "easeoutelastic(t)", "springy wobble that settles at 1", "Mapping & blending", "f_ease",
+    kind="elastic")
+reg("easeoutbounce", "easeoutbounce(t)", "drops and bounces to rest at 1", "Mapping & blending", "f_ease",
+    kind="bounce")
 reg("smootherstep", "smootherstep(edge0, edge1, x)", "0..1 extra-smooth ramp", "Mapping & blending",
     "f_smoothstep", interp="SMOOTHERSTEP")
 reg("clamp", "clamp(x, min, max)", "floats or vectors", "Mapping & blending", "f_clamp")
@@ -198,6 +209,9 @@ class MathFuncs:
         d = FUNCS[name].data
         vals = self.args(node, name, {d["n"]})
         if any(v.t == VECTOR for v in vals):
+            if d["mop"] in ("RADIANS", "DEGREES") and len(vals) == 1:     # VEX allows vectors here
+                f = math.pi / 180 if d["mop"] == "RADIANS" else 180 / math.pi
+                return self.vmath("SCALE", vals[0], scale=Val(FLOAT, c=f))
             if d["vop"] is None:
                 raise FormulaError(f"{name}() works on floats only — apply it to a component (.x .y .z)")
             return self.vmath(d["vop"], *vals)
@@ -337,6 +351,46 @@ class MathFuncs:
                        {"Value": self.inp(x, FLOAT), "From Min": self.inp(e0, FLOAT),
                         "From Max": self.inp(e1, FLOAT), "To Min": 0.0, "To Max": 1.0})
         return Val(FLOAT, o=n.out("Result"), field=e0.field or e1.field or x.field)
+
+    def f_ease(self, node, name):
+        kind = FUNCS[name].data["kind"]
+        args = self.args(node, name, {1} if kind in ("elastic", "bounce") else {1, 2})
+        C = lambda v: Val(FLOAT, c=float(v))  # noqa: E731
+        t = self.coerce(args[0], FLOAT, f"{name}()'s t")
+        t = self.math("MINIMUM", self.math("MAXIMUM", t, C(0)), C(1))
+        p = self.coerce(args[1], FLOAT, f"{name}()'s power") if len(args) > 1 else C(2 if kind != "back" else 1.70158)
+        inv = self.math("SUBTRACT", C(1), t)
+        if kind == "in":
+            return self.math("POWER", t, p)
+        if kind == "out":
+            return self.math("SUBTRACT", C(1), self.math("POWER", inv, p))
+        if kind == "inout":
+            lo = self.math("MULTIPLY", C(0.5), self.math("POWER", self.math("MULTIPLY", t, C(2)), p))
+            hi = self.math("SUBTRACT", C(1), self.math("MULTIPLY", C(0.5),
+                                                       self.math("POWER", self.math("MULTIPLY", inv, C(2)), p)))
+            return self.switch(self.compare("LESS_THAN", t, C(0.5)), hi, lo, FLOAT)
+        if kind == "back":       # 1 + (s+1)(t-1)^3 + s(t-1)^2
+            u = self.math("SUBTRACT", t, C(1))
+            u2 = self.math("MULTIPLY", u, u)
+            a = self.math("MULTIPLY", self.math("ADD", p, C(1)), self.math("MULTIPLY", u2, u))
+            return self.math("ADD", C(1), self.math("ADD", a, self.math("MULTIPLY", p, u2)))
+        if kind == "elastic":    # 2^(-10t) sin((10t - 0.75) 2π/3) + 1, exactly 0 at t = 0
+            w = self.math("SINE", self.math("MULTIPLY", self.math("SUBTRACT", self.math("MULTIPLY", t, C(10)),
+                                                                   C(0.75)), C(2 * 3.141592653589793 / 3)))
+            e = self.math("ADD", self.math("MULTIPLY", self.math("POWER", C(2), self.math("MULTIPLY", t, C(-10))), w),
+                          C(1))
+            return self.switch(self.compare("LESS_EQUAL", t, C(0)), e, C(0), FLOAT)
+        # bounce: four parabolic arcs
+        n1, d1 = 7.5625, 2.75
+        arcs = []
+        for edge, off, add in ((1 / d1, 0.0, 0.0), (2 / d1, 1.5 / d1, 0.75), (2.5 / d1, 2.25 / d1, 0.9375),
+                               (9e9, 2.625 / d1, 0.984375)):
+            u = self.math("SUBTRACT", t, C(off))
+            arcs.append((edge, self.math("ADD", self.math("MULTIPLY", C(n1), self.math("MULTIPLY", u, u)), C(add))))
+        out = arcs[-1][1]
+        for edge, v in reversed(arcs[:-1]):
+            out = self.switch(self.compare("LESS_THAN", t, C(edge)), out, v, FLOAT)
+        return out
 
     def f_clamp(self, node, name):
         x, lo, hi = self.args(node, name, {3})

@@ -585,6 +585,11 @@ def preprocess(text):
     if re.search(r"(?<![\w@])[fivbspcu34]\[\]@", code):
         raise FormulaError("array attributes (f[]@name) aren't possible in Blender — attributes hold one value "
                            "per element; use an array variable (float a[] = ...) or several attributes")
+    m = re.search(r"\$(FF|F|T|FPS|SF|ST|E|PI)\b", code)
+    if m:
+        alt = {"F": "@Frame", "FF": "@Frame", "SF": "@Frame", "T": "@Time", "ST": "@Time",
+               "FPS": "1 / @TimeInc", "E": "e", "PI": "pi"}[m.group(1)]
+        raise FormulaError(f"${m.group(1)} is an HScript variable — in a wrangle write {alt}")
     code = code.replace("&&", " and ").replace("||", " or ")
     code = re.sub(r"!(?!=)", " not ", code)
     code = code.replace("^", "**")
@@ -932,7 +937,10 @@ class _Parser:
             word = payload.strip().lower()
             if word not in FOREACH_DOMAINS:
                 raise FormulaError(
-                    f"unknown foreach domain '{payload}' — use point, edge, face, vertex, curve or instance",
+                    f"unknown foreach domain '{payload}' — use point, prim (face), vertex, edge, curve or "
+                    f"instance" + (". For connected pieces read @island, and use avgof(value, @island) / "
+                                   f"sumof(value, @island) for per-piece values"
+                                   if word in ("island", "piece", "pieces", "class", "connectivity") else ""),
                     line)
             return SBlock(line, "foreach", FOREACH_DOMAINS[word], body, text=text)
         if kind == "runover":

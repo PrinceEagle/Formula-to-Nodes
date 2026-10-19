@@ -16,15 +16,40 @@ def _err(message, **extra):
     return {"ok": False, "error": message, **extra}
 
 
+def _panel_path(it):
+    names, p = [], getattr(it, "parent", None)
+    while p is not None and getattr(p, "name", ""):
+        names.append(p.name)
+        p = getattr(p, "parent", None)
+    return "/".join(reversed(names))
+
+
 def _params(tree):
+    """Inputs in the order they appear on the modifier, with their panel path ("Scale/min")."""
+    from . import ramps
     out = []
     for it in tree.interface.items_tree:
         if it.item_type != "SOCKET" or it.in_out != "INPUT" or it.socket_type == "NodeSocketGeometry":
             continue
         d = getattr(it, "default_value", None)
-        if d is not None and not isinstance(d, (int, float, bool, str)):
-            d = [round(x, 5) for x in d]
-        out.append({"name": it.name, "type": it.socket_type.replace("NodeSocket", "").lower(), "default": d})
+        if isinstance(d, float):
+            d = round(d, 5)
+        elif d is not None and not isinstance(d, (int, bool, str)):
+            try:
+                d = [round(x, 5) for x in d]
+            except TypeError:
+                d = None
+        panel = _panel_path(it)
+        entry = {"name": f"{panel}/{it.name}" if panel else it.name,
+                 "type": it.socket_type.replace("NodeSocket", "").lower(), "default": d}
+        for k in ("min_value", "max_value"):
+            v = getattr(it, k, None)
+            if v is not None and abs(v) < 1e8:
+                entry[k[:3]] = round(v, 5)
+        out.append(entry)
+    for name, kind, node in ramps.ramp_nodes(tree):
+        out.append({"name": name, "type": "colorramp" if kind == "color" else "ramp",
+                    "preset": node.get(ramps.PRESET_KEY, "")})
     return out
 
 
@@ -133,27 +158,68 @@ def set_parameters(object_name, values, modifier=""):
     if not mods:
         return _err(f"'{ob.name}' has no Formula to Nodes modifier" + (f" named '{modifier}'" if modifier else ""))
     mod = mods[-1]
-    ids = {it.name: it.identifier for it in mod.node_group.interface.items_tree
-           if it.item_type == "SOCKET" and it.in_out == "INPUT"}
+    from . import ramps
+    items = [it for it in mod.node_group.interface.items_tree if it.item_type == "SOCKET" and it.in_out == "INPUT"]
+    by_path = {}
+    for it in items:
+        panel = _panel_path(it)
+        by_path[f"{panel}/{it.name}" if panel else it.name] = it
+    by_name = {}
+    for it in items:
+        by_name.setdefault(it.name, []).append(it)
+    ramp_by_name = {}
+    for rname, kind, node in ramps.ramp_nodes(mod.node_group):
+        ramp_by_name.setdefault(rname, []).append((kind, node))
     inputs = mod.properties.inputs
-    done, missing = {}, []
-    for name, value in values.items():
-        ident = ids.get(name)
-        item = getattr(inputs, ident, None) if ident else None
-        if item is None:
-            missing.append(name)
+    done, failed = {}, []
+    for key, value in values.items():
+        if key in ramp_by_name or key.rsplit("/", 1)[-1] in ramp_by_name and key not in by_path:
+            # a ramp: set its preset (shared by every user of the group)
+            preset = str(value).strip().lower().replace(" ", "_")
+            for kind, node in ramp_by_name.get(key) or ramp_by_name[key.rsplit("/", 1)[-1]]:
+                table = ramps.COLOR_PRESETS if kind == "color" else ramps.FLOAT_PRESETS
+                if preset not in table:
+                    failed.append(f"{key} (unknown preset '{value}' — {', '.join(sorted(table))})")
+                    break
+                ramps.apply(node, kind, node.get(ramps.RAMP_KEY), preset)
+            else:
+                done[key] = preset
             continue
+        it = by_path.get(key)
+        if it is None:
+            cands = by_name.get(key, [])
+            if len(cands) > 1:
+                failed.append(f"{key} (ambiguous — say which panel: "
+                              f"{', '.join(p for p, i in by_path.items() if i.name == key)})")
+                continue
+            it = cands[0] if cands else None
+        item = getattr(inputs, it.identifier, None) if it is not None else None
+        if item is None:
+            failed.append(f"{key} (no such input)")
+            continue
+        st = it.socket_type
         try:
-            item.value = value
-            done[name] = value
-        except (TypeError, ValueError) as e:
-            missing.append(f"{name} ({e})")
+            if st in ("NodeSocketObject", "NodeSocketCollection", "NodeSocketMaterial", "NodeSocketImage"):
+                coll = {"NodeSocketObject": bpy.data.objects, "NodeSocketCollection": bpy.data.collections,
+                        "NodeSocketMaterial": bpy.data.materials, "NodeSocketImage": bpy.data.images}[st]
+                ref = None if value in (None, "") else coll.get(str(value))
+                if value not in (None, "") and ref is None:
+                    failed.append(f"{key} (no {st[10:].lower()} named '{value}')")
+                    continue
+                item.value = ref
+                done[key] = ref.name if ref else None
+            else:
+                item.value = value
+                done[key] = value
+        except (TypeError, ValueError, AttributeError) as e:
+            failed.append(f"{key} ({e})")
     ob.update_tag()
     _undo_push("Formula: set parameters")
     _redraw()
-    out = {"ok": not missing, "object": ob.name, "modifier": mod.name, "set": done}
-    if missing:
-        out["error"] = "couldn't set: " + ", ".join(missing) + f" (available: {', '.join(ids)})"
+    out = {"ok": not failed, "object": ob.name, "modifier": mod.name, "set": done}
+    if failed:
+        out["error"] = ("couldn't set: " + "; ".join(failed) + " — the others were set. Inputs: "
+                        + ", ".join(by_path) + (" · ramps: " + ", ".join(ramp_by_name) if ramp_by_name else ""))
     return out
 
 
@@ -169,23 +235,53 @@ def _value(d):
     return None
 
 
-def inspect(object_name, attributes=None, limit=8):
-    """Evaluated attribute values after all modifiers — lets the AI verify results."""
-    ob = _object(object_name)
-    if ob is None:
-        return _err(f"object '{object_name}' not found")
-    limit = max(1, min(int(limit), 200))
-    dg = bpy.context.evaluated_depsgraph_get()
-    ev = ob.evaluated_get(dg)
+def _stats(a):
+    from . import viewer
+    st = viewer._attr_stats(a, len(a.data))
+    if not st or "min" not in st:
+        return None
+    r = lambda v: [round(x, 5) for x in v] if st["width"] > 1 else round(v[0], 5)  # noqa: E731
+    out = {"min": r(st["min"]), "mean": r(st["mean"]), "max": r(st["max"])}
+    if st.get("bad"):
+        out["nan_or_inf"] = st["bad"]
+    return out
+
+
+def _components(geo):
+    for name in ("mesh", "pointcloud", "curves"):
+        comp = getattr(geo, name, None)
+        if comp is not None:
+            yield name, comp
+    inst = getattr(geo, "instances_pointcloud", None)
+    if callable(inst):
+        try:
+            pc = inst()
+        except Exception:
+            pc = None
+        if pc is not None:
+            yield "instances", pc
+
+
+def _volume(geo):
+    vol = getattr(geo, "volume", None)
+    if vol is None:
+        return None
+    grids = []
     try:
-        geo = ev.evaluated_geometry()
-    except AttributeError:
-        return _err("this Blender version can't read evaluated geometry")
+        vol.grids.load()
+    except Exception:
+        pass
+    for g in getattr(vol, "grids", []):
+        grids.append({"name": g.name, "type": getattr(g, "data_type", ""),
+                      "channels": getattr(g, "channels", None)})
+    return {"grids": grids}
+
+
+def _inspect_once(ob, attributes, limit, elements):
+    dg = bpy.context.evaluated_depsgraph_get()
+    gs = ob.evaluated_get(dg).evaluated_geometry()
     comps = {}
-    for comp_name in ("mesh", "pointcloud", "curves"):
-        comp = getattr(geo, comp_name, None)
-        if comp is None:
-            continue
+    for comp_name, comp in _components(gs):
         attrs = {}
         for a in comp.attributes:
             if a.name.startswith("."):
@@ -193,14 +289,64 @@ def inspect(object_name, attributes=None, limit=8):
             if attributes and a.name not in attributes:
                 continue
             data = a.data
-            attrs[a.name] = {"domain": a.domain, "type": a.data_type, "count": len(data),
-                             "values": [_value(data[i]) for i in range(min(limit, len(data)))]}
+            n = len(data)
+            idx = [i for i in elements if 0 <= i < n] if elements else range(min(limit, n))
+            entry = {"domain": a.domain, "type": a.data_type, "count": n}
+            if elements:
+                entry["values"] = {str(i): _value(data[i]) for i in idx}
+            else:
+                entry["values"] = [_value(data[i]) for i in idx]
+            st = _stats(a) if a.data_type != "STRING" else None
+            if st:
+                entry["stats"] = st
+            attrs[a.name] = entry
         comps[comp_name] = attrs
+    vol = _volume(gs)
+    if vol:
+        comps["volume"] = vol
+    # detail values live on the geometry as a bundle-like set of single values; read what we can
+    del gs
+    return comps
+
+
+def inspect(object_name, attributes=None, limit=8, frames=None, elements=None):
+    """Evaluated attribute values after all modifiers — first values, min/mean/max, instances and volume
+    grids. frames=[1, 24, 48] reads each frame; elements=[0, 10] reads those indices."""
+    ob = _object(object_name)
+    if ob is None:
+        return _err(f"object '{object_name}' not found")
+    limit = max(1, min(int(limit), 200))
+    elements = [int(i) for i in (elements or [])][:50]
+    if not hasattr(ob, "evaluated_geometry"):
+        return _err("this Blender version can't read evaluated geometry")
+    scene = bpy.context.scene
+    out = {"ok": True, "object": ob.name}
+    if frames:
+        keep = scene.frame_current
+        per = {}
+        try:
+            for f in [int(x) for x in frames][:12]:
+                scene.frame_set(f)
+                per[str(f)] = _inspect_once(ob, attributes, limit, elements)
+        finally:
+            scene.frame_set(keep)
+        out["frames"] = per
+    else:
+        out["frame"] = scene.frame_current
+        out["components"] = _inspect_once(ob, attributes, limit, elements)
     warnings = []
     for m in ob.modifiers:
         for w in getattr(m, "node_warnings", []):
             warnings.append(f"{m.name}: {getattr(w, 'message', str(w))}")
-    return {"ok": True, "object": ob.name, "components": comps, "warnings": warnings}
+        if m.type == "NODES" and m.node_group is not None:
+            for it in m.node_group.interface.items_tree:
+                if it.item_type == "SOCKET" and it.in_out == "INPUT" and it.socket_type == "NodeSocketObject":
+                    v = getattr(m.properties.inputs, it.identifier, None)
+                    if v is not None and getattr(v, "value", 1) is None:
+                        warnings.append(f"{m.name}: object input '{it.name}' is empty — set it with "
+                                        f"formula_set_parameters")
+    out["warnings"] = warnings
+    return out
 
 
 def scene_overview():
@@ -229,6 +375,12 @@ def decompile_group(group):
     except Exception as e:      # an unusual tree shouldn't take the bridge down
         return _err(f"couldn't convert '{group}': {e}")
     return {"ok": True, "group": tree.name, "script": script, "notes": notes}
+
+
+def language_guide():
+    """The language reference written for the Blender that's actually running."""
+    from . import ai
+    return {"ok": True, "guide": ai.build_system_prompt(for_tools=True, target=caps.from_blender(bpy))}
 
 
 def capabilities():

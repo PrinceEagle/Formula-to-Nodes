@@ -116,5 +116,33 @@ class UITest(unittest.TestCase):
         self.assertEqual(build.broken_links(tree, res3), [])
 
 
+    def test_rebuild_risks(self):
+        """Asking before a rebuild: different script into a selected group, hand edits, cut links."""
+        src = 'f@h = chf("a", 1);'
+        res = compiler.compile_source(src, **ui.compile_options())
+        tree = build.build_group(res, src, "SCRIPT")
+
+        class Space:       # stand-in for the node editor: editing the group itself
+            edit_tree = tree
+        sp = Space()
+        self.assertIs(ui.target_tree(sp), tree)
+        ui.set_script_text(self.s, src, origin="group:" + tree.name)
+        self.assertEqual(ui.rebuild_risks(bpy.context, sp, src, "SCRIPT", "AUTO"), [])
+        other = 'f@k = 2;'
+        ui.set_script_text(self.s, other, origin="recipe:x")
+        risks = ui.rebuild_risks(bpy.context, sp, other, "SCRIPT", "AUTO")
+        self.assertTrue(any("different script" in r for r in risks))
+        tree.nodes.new("ShaderNodeMath")
+        risks = ui.rebuild_risks(bpy.context, sp, other, "SCRIPT", "AUTO")
+        self.assertTrue(any("by hand" in r for r in risks))
+
+    def test_recovery_text(self):
+        ui.set_script_text(self.s, "f@a = 1;")
+        ui.set_script_text(self.s, "f@b = 2;", backup="before loading a recipe")
+        rec = bpy.data.texts.get(ui.RECOVERY_TEXT)
+        self.assertIsNotNone(rec)
+        self.assertIn("f@a = 1;", rec.as_string())
+
+
 if __name__ == "__main__":
     unittest.main()

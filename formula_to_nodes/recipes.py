@@ -10,7 +10,7 @@ Recipe fields
     test     how the test suite runs it: {"kind": "ico"|"grid"|..., "inputs": {...}, "prelude": "..."}
 """
 
-CATEGORIES = ["Masks", "Deformers", "Scatter & Instance", "Growth & Simulation", "Smoke & Fire", "Liquids",
+CATEGORIES = ["From Houdini", "Masks", "Deformers", "Scatter & Instance", "Growth & Simulation", "Smoke & Fire", "Liquids",
               "Volumes", "Effectors", "Color", "Curves", "Modeling", "Utility"]
 VOLUME_CATEGORIES = ("Smoke & Fire", "Volumes")     # recipes built on grids
 
@@ -31,6 +31,252 @@ class Recipe:
 
 R = Recipe
 RECIPES = [
+    # ── From Houdini: the SOPs Houdini artists reach for, by their Houdini names ──────────
+    R("attrib_transfer", "Attribute Transfer", "From Houdini",
+      "Houdini's Attribute Transfer: copies colour (Cd) from the nearest surface of the 'Input 1' object, "
+      "fading out over a blend distance. Also stores the weight in f@transfer_weight.",
+      """
+// Houdini: Attribute Transfer. Pick the source object as "Input 1" on the modifier.
+float d = xyzdist(1, @P);
+float reach = chf("Blend/distance", 0.1, min=0);
+float w = 1 - smoothstep(reach, reach + chf("Blend/falloff", 0.3, min=0.001), d);
+vector base = haspointattrib(0, "Cd") ? v@Cd : chv("base_color", {0.5, 0.5, 0.5});
+@Cd = lerp(base, primuv(1, "Cd", @P), w);
+f@transfer_weight = w;
+""", tags=("houdini", "attribute transfer", "attribtransfer", "copy attribute", "nearest", "colour"),
+      needs=("Input 1: the object to copy from (with a Cd attribute)",), test={"inputs": {"Input 1": "cube"}}),
+
+    R("group_expression", "Group Expression", "From Houdini",
+      "Houdini's Group Expression: b@group marks the faces matching a rule — facing a direction, above a "
+      "height, noise, or a random percentage — and can delete them (Blast).",
+      """
+#runover prim
+// Houdini: Group Expression (+ Blast). The group is the bool attribute b@group.
+int rule = chi("Rule/mode", 0, min=0, max=3, tip="0 facing a direction · 1 above a height · 2 noise · 3 random");
+float score = 0;
+if (rule == 0) score = dot(normalize(@N), normalize(chv("Rule/direction", {0, 0, 1})));
+else if (rule == 1) score = @P.z - chf("Rule/height", 0);
+else if (rule == 2) score = noise(@P * chf("Rule/noise_scale", 2));
+else score = rand(@primnum + chi("Rule/seed", 0));
+b@group = rule == 3 ? score < chf("Rule/percent", 0.3) : score > chf("Rule/threshold", 0.7);
+if (chb("Blast/delete_group", 0) && b@group) removeprim(0, @primnum, 1);
+""", tags=("houdini", "group", "group expression", "selection", "blast", "delete", "mask")),
+
+    R("poly_extrude", "PolyExtrude a group", "From Houdini",
+      "Houdini's PolyExtrude on a group: faces facing up (or a random share of them) are extruded; "
+      "b@extrudeFront and b@extrudeSide mark the new faces like PolyExtrude's front/side groups.",
+      """
+#runover prim
+// Houdini: PolyExtrude. Only faces in the selection extrude; individual = 1 extrudes each face alone.
+b@sel = dot(normalize(@N), {0, 0, 1}) > chf("Select/facing_up", 0.7)
+        && rand(@primnum + chi("Select/seed", 0)) < chf("Select/percent", 1, min=0, max=1);
+if (b@sel) extrude(chf("distance", 0.2), chi("individual", 0, min=0, max=1));
+""", tags=("houdini", "polyextrude", "extrude", "front", "side", "group"), test={"kind": "grid"}),
+
+    R("connectivity", "Connectivity: per-piece colour & offset", "From Houdini",
+      "Houdini's Connectivity + For-Each piece: @island numbers connected pieces (stored as i@class); "
+      "each piece gets a random colour and can shrink or push away from the centre around its own middle.",
+      """
+// Houdini: Connectivity (i@class) and a for-each-piece transform, without a loop: aggregates per @island.
+i@class = @island;
+vector center = avgof(@P, @island);
+float r = rand(@island + chi("seed", 0));
+@Cd = hsvtorgb(set(r, chf("Color/saturation", 0.6), chf("Color/value", 0.9)));
+float s = fit01(rand(@island + 7), chf("Pieces/scale_min", 0.8, min=0), 1);
+vector out = normalize(center - getbbox_center(0));
+@P = center + (@P - center) * s + out * chf("Pieces/explode", 0);
+""", tags=("houdini", "connectivity", "class", "pieces", "island", "foreach", "for each", "explode")),
+
+    R("sweep_profile", "Sweep a profile curve", "From Houdini",
+      "Houdini's Resample + Sweep: resamples the curves, then sweeps the 'Profile' curve object along them "
+      "with a width ramp and a twist. Draw the profile around its origin in the X/Y plane.",
+      """
+// Houdini: Resample + Sweep (with a profile). @curveparam is Houdini's @curveu.
+resample(chi("segments", 64, min=2));
+f@tilt = @curveparam * radians(chf("twist_degrees", 0));
+float w = chramp("Width/along", @curveparam, "plateau") * chf("Width/scale", 1);
+sweep(chobj("Profile"), w);
+""", tags=("houdini", "sweep", "resample", "profile", "road", "pipe", "ribbon", "curveu"),
+      needs=("curves (convert a mesh with tocurves())", "Profile: a curve object"),
+      test={"kind": "line", "prelude": "tocurves();", "inputs": {"Profile": "cube"}}),
+
+    R("mountain", "Mountain", "From Houdini",
+      "Houdini's Mountain SOP: fractal noise pushes points along their normals, with height, element size, "
+      "octaves, roughness and offset.",
+      """
+// Houdini: Mountain. Same controls: height, element size, roughness, offset.
+float h = fbm(@P / chf("element_size", 1, min=0.001) + chv("offset", {0, 0, 0}), 1,
+              chi("octaves", 5, min=1, max=10), chf("roughness", 0.5, min=0, max=1));
+@P += normalize(@N) * (h - 0.5) * chf("height", 0.5);
+""", tags=("houdini", "mountain", "fractal", "displace", "terrain", "noise", "rock")),
+
+    R("peak", "Peak", "From Houdini",
+      "Houdini's Peak: moves points along their normals — inflate (positive) or shrink (negative), "
+      "optionally only where a mask attribute is high.",
+      """
+// Houdini: Peak. Optional mask: an attribute name typed into the script (default: everything moves).
+float m = haspointattrib(0, "mask") ? f@mask : 1;
+@P += normalize(@N) * chf("distance", 0.05) * m;
+""", tags=("houdini", "peak", "inflate", "shrink", "push", "normal")),
+
+    R("measure", "Measure: area & curvature", "From Houdini",
+      "Houdini's Measure: f@face_area per face and a curvature estimate per point (positive on bumps, "
+      "negative in dents) — ready to drive masks, colour or scattering.",
+      """
+// Houdini: Measure. f@face_area per face; f@curvature per point (how far a point sticks out of its neighbours).
+runover(prim) { f@face_area = @area; }
+vector avg = blur(@P, chi("smoothing", 1, min=1));
+f@curvature = dot(normalize(@N), @P - avg) / chf("scale", 0.02, min=0.0001);
+@Cd = colorramp("view", fit(f@curvature, -1, 1, 0, 1), "heat");
+""", tags=("houdini", "measure", "area", "curvature", "convexity", "cavity")),
+
+    R("attrib_noise", "Attribute Noise", "From Houdini",
+      "Houdini's Attribute Noise: animated fractal noise into f@noise, remapped by a ramp — and optionally "
+      "into colour or pushed along the normals.",
+      """
+// Houdini: Attribute Noise. Mode: 0 f@noise only · 1 also colour · 2 also displace along N.
+vector p = @P * chf("Noise/frequency", 2) + {0, 0, 1} * @Time * chf("Noise/speed", 0.5)
+           + chv("Noise/offset", {0, 0, 0});
+float n = fit(snoise(p, 1, chi("Noise/octaves", 3, min=1), chf("Noise/roughness", 0.5)), -1, 1, 0, 1);
+n = chramp("remap", n, "linear");
+f@noise = n;
+int mode = chi("Output/mode", 0, min=0, max=2);
+if (mode == 1) @Cd = colorramp("colors", n, "viridis");
+if (mode == 2) @P += normalize(@N) * (n - 0.5) * chf("Output/amplitude", 0.2);
+""", tags=("houdini", "attribute noise", "attribnoise", "noise", "animated", "displace", "colour")),
+
+    R("copy_prep", "Copy to Points prep", "From Houdini",
+      "The usual wrangle before Copy to Points: random @pscale, p@orient with +Z along the normal and a "
+      "random spin, and i@variant picking a child of the collection.",
+      """
+// Houdini: the copy-to-points wrangle. @pscale, p@orient (+Z along @N, random spin), i@variant.
+@pscale = fit01(pow(rand(@ptnum + chi("seed", 0)), chf("Scale/bias", 1, min=0.1)),
+                chf("Scale/min", 0.5), chf("Scale/max", 1.5));
+vector4 align = dihedral({0, 0, 1}, normalize(@N));
+p@orient = qmultiply(align, quaternion(rand(@ptnum + 3) * radians(chf("spin_degrees", 360)), {0, 0, 1}));
+i@variant = int(rand(@ptnum + 9) * chi("variants", 3, min=1));
+instance(chcoll("Collection"), i@variant);
+""", tags=("houdini", "copy to points", "pscale", "orient", "instance", "variant"),
+      needs=("Collection: the objects to copy",), test={"inputs": {"Collection": "collection"}}),
+
+    R("point_relax", "Point Relax", "From Houdini",
+      "Houdini's Relax for scattered points: each point steps away from its nearest neighbour until they "
+      "are about 'radius' apart — removes clumps for even instancing.",
+      """
+// Houdini: Relax. A few iterations of pushing away from the nearest other point.
+float r = chf("radius", 0.1, min=0.001);
+repeat(chi("iterations", 10, min=1, max=100)) {
+    int nb = nearpoint(0, @P);
+    vector away = @P - point(0, "P", nb);
+    @P += normalize(away) * max(r - length(away), 0) * 0.5 * chf("strength", 1, min=0, max=1);
+}
+""", tags=("houdini", "relax", "point relax", "even", "spread", "declump", "scatter"),
+      test={"kind": "plane", "prelude": "scatter(200);"}),
+
+    R("pop_source", "POP Source + forces", "Growth & Simulation",
+      "Houdini's POP Source with POP Force, Drag and Curl: particles are born from the surface over time, "
+      "live for a random life, then die. Writes @v, f@age, f@life and @pscale for instancing or rendering.",
+      """
+// Houdini: POP Source → POP Force / Drag / Curl Force → age & reap. Blender is Z-up.
+scatter(chf("Source/pool_density", 300), chi("Source/seed", 0));
+simulate {
+    init {
+        f@birth = rand(@ptnum) * chf("Source/emit_seconds", 3);
+        f@life = fit01(rand(@ptnum + 1), chf("Life/min", 1), chf("Life/max", 2));
+        f@age = 0;
+        @v = @N * chf("Source/speed", 1);
+    }
+    float alive = @Time >= f@birth ? 1 : 0;
+    vector curl = curlnoise(@P + {0, 0, 1} * @Time, chf("Forces/curl_scale", 1)) * chf("Forces/curl", 2);
+    @v += (chv("Forces/gravity", {0, 0, -2}) + curl - @v * chf("Forces/drag", 0.5)) * deltatime * alive;
+    @P += @v * deltatime * alive;
+    f@age += deltatime * alive;
+    @pscale = alive * chf("size", 0.02) * (1 - f@age / max(f@life, 0.001));
+    if (f@age > f@life) removepoint(0, @ptnum);
+}
+""", tags=("houdini", "pop", "particles", "source", "emit", "age", "life", "curl", "drag", "simulation"),
+      test={"kind": "plane", "frames": 3}),
+
+    R("age_color", "Age to colour & size", "Color",
+      "The classic POP look-dev wrangle: normalized age (f@age / f@life) through ramps into @Cd and @pscale. "
+      "Use after POP Source + forces, or any script that writes f@age and f@life.",
+      """
+// Houdini POP look-dev: life fraction → colour and size ramps.
+float t = clamp(f@age / max(f@life, 0.0001), 0, 1);
+@Cd = colorramp("Look/color_over_life", t, "fire");
+@pscale = chramp("Look/size_over_life", t, "bell") * chf("Look/size", 0.03);
+""", tags=("houdini", "pop", "age", "life", "colour", "ramp", "particles")),
+
+    # ── motion design (MoGraph habits) ──────────────────────────────────────
+    R("stagger_in", "Stagger in", "Effectors",
+      "Instances animate in one after another — ordered by index, by distance from the 'Origin' object, or "
+      "randomly — growing with an overshooting ease and dropping in from an offset.",
+      """
+#runover instance
+// Each instance starts at its own frame; easeoutback gives the overshoot.
+int by = chi("Delay/order_by", 0, min=0, max=2, tip="0 index · 1 distance from Origin · 2 random");
+float d = length(v@P - objpos(chobj("Delay/Origin")));
+float order = by == 0 ? @elemnum / max(@numelem - 1, 1) : by == 1 ? d / max(maxof(d), 0.0001) : rand(@elemnum);
+float start = chf("Timing/start_frame", 1) + order * chf("Timing/spread_frames", 48);
+float t = clamp((@Frame - start) / max(chf("Timing/duration_frames", 12), 1), 0, 1);
+@scale *= easeoutback(t, chf("Timing/overshoot", 1.7));
+v@P += chv("from_offset", {0, 0, 1}) * (1 - easeout(t, 3));
+""", tags=("mograph", "stagger", "animate in", "delay", "ease", "build", "motion design"),
+      needs=("instances (from a cloner or scatter)",),
+      test={"prelude": 'points(9);\n@P = set(@ptnum % 3, floor(@ptnum / 3), 0);\ninstance(chobj("I"));',
+            "inputs": {"I": "cube"}, "frames": 3}),
+
+    R("random_effector", "Random effector", "Effectors",
+      "MoGraph's Random effector: per-instance random position, rotation and scale with a seed, optionally "
+      "only inside a spherical falloff around the 'Falloff' object.",
+      """
+#runover instance
+#include "falloff.h"
+// Random effector with an optional spherical falloff.
+float w = chb("Falloff/use", 0) ? falloff_sphere(v@P, objpos(chobj("Falloff/Object")),
+                                                 chf("Falloff/radius", 2), chf("Falloff/softness", 0.5)) : 1;
+int s = chi("seed", 0) * 7;
+vector r3 = set(rand(@elemnum * 3 + s), rand(@elemnum * 3 + 1 + s), rand(@elemnum * 3 + 2 + s)) * 2 - 1;
+v@P += r3 * chv("Random/position", {0.2, 0.2, 0.2}) * w;
+vector deg = radians(chv("Random/rotation_degrees", {0, 0, 45})) * r3 * w;
+p@orient = qmultiply(p@orient, qmultiply(quaternion(deg.z, {0, 0, 1}),
+                     qmultiply(quaternion(deg.y, {0, 1, 0}), quaternion(deg.x, {1, 0, 0}))));
+@scale *= 1 + (rand(@elemnum + 99 + s) * 2 - 1) * chf("Random/scale", 0.3) * w;
+""", tags=("mograph", "random", "effector", "jitter", "falloff", "motion design"),
+      needs=("instances (from a cloner or scatter)",),
+      test={"prelude": 'points(9);\n@P = set(@ptnum % 3, floor(@ptnum / 3), 0);\ninstance(chobj("I"));',
+            "inputs": {"I": "cube"}}),
+
+    R("step_effector", "Step & cascade", "Effectors",
+      "MoGraph's Step effector with a time offset: scale and offset change progressively from the first "
+      "instance to the last along a curve, and a wave runs through them with a delay per instance.",
+      """
+#runover instance
+// u: 0 for the first instance, 1 for the last.
+float u = @elemnum / max(@numelem - 1, 1);
+float s = chramp("Step/curve", u, "linear");
+@scale *= lerp(chf("Step/scale_first", 1), chf("Step/scale_last", 0.3), s);
+v@P += chv("Step/offset_last", {0, 0, 0}) * s;
+float phase = (@Time * chf("Cascade/speed", 1) - u * chf("Cascade/delay", 2)) * 2 * pi;
+v@P.z += sin(phase) * chf("Cascade/height", 0.3);
+""", tags=("mograph", "step", "cascade", "time offset", "delay", "wave", "motion design"),
+      needs=("instances (from a cloner or scatter)",),
+      test={"prelude": 'points(9);\n@P = set(@ptnum, 0, 0);\ninstance(chobj("I"));',
+            "inputs": {"I": "cube"}, "frames": 3}),
+
+    R("radial_cloner", "Radial cloner", "Scatter & Instance",
+      "MoGraph's radial cloner: N copies of the 'Shape' object around a circle or an arc, facing outward.",
+      """
+// Radial cloner: count copies around an arc of sweep_degrees.
+points(chi("count", 12, min=1));
+float full = chf("sweep_degrees", 360, min=0, max=360);
+float a = radians(chf("start_degrees", 0)) + radians(full) * @ptnum / max(full >= 360 ? @numpt : @numpt - 1, 1);
+@P = set(cos(a), sin(a), 0) * chf("radius", 2);
+p@orient = quaternion(a * chb("face_outward", 1), {0, 0, 1});
+instance(chobj("Shape"));
+""", tags=("mograph", "cloner", "radial", "circle", "array", "instance", "motion design"),
+      needs=("Shape: the object to clone",), test={"inputs": {"Shape": "cube"}}),
+
     # ── Masks ────────────────────────────────────────────────────────────────
     R("slope_mask", "Slope mask", "Masks",
       "1 on flat, upward faces and 0 on steep walls — for moss, snow or grass placement.",
@@ -264,14 +510,14 @@ if (rand(@id + chi("seed", 0)) < chf("remove_fraction", 0.5)) removepoint(0, @pt
 topoints();
 simulate {
     init {
-        v@vel = v@N * chf("launch", 3) + set(snoise(v@P, 4), snoise(v@P + 5, 4), 0) * chf("spread", 1);
+        @v = v@N * chf("launch", 3) + set(snoise(v@P, 4), snoise(v@P + 5, 4), 0) * chf("spread", 1);
     }
-    v@vel += set(0, 0, -chf("gravity", 9.8)) * deltatime;
-    v@vel *= 1 - chf("drag", 0.1) * deltatime;
-    @P += v@vel * deltatime;
+    @v += set(0, 0, -chf("gravity", 9.8)) * deltatime;
+    @v *= 1 - chf("drag", 0.1) * deltatime;
+    @P += @v * deltatime;
     if (@P.z < chf("ground", 0)) {
         @P.z = chf("ground", 0);
-        v@vel = set(v@vel.x, v@vel.y, -v@vel.z * chf("bounce", 0.5));
+        @v = set(@v.x, @v.y, -@v.z * chf("bounce", 0.5));
     }
 }
 """, tags=("particles", "gravity", "bounce", "simulation")),
@@ -551,7 +797,7 @@ simulate {
         f@density = max(f@density * (1 - chf("dissipation", 0.08) * deltatime), puff);
         f@temperature = max(f@temperature * (1 - chf("cooling", 0.7) * deltatime), puff);
         // hot smoke rises; curl noise breaks up the column
-        vector turb = curlnoise(@P, chf("Turbulence/scale", 1.5), @Time * 0.3);
+        vector turb = curlnoise(@P - {0, 0, 1} * @Time * 0.3, chf("Turbulence/scale", 1.5));
         v@vel += ({0, 0, 1} * f@temperature * chf("buoyancy", 5)
                   + turb * chf("Turbulence/strength", 1.5) * f@density) * deltatime;
     }
@@ -591,7 +837,7 @@ simulate {
         f@fuel = fuel - burn;
         f@temperature = min(f@temperature * (1 - chf("Burn/cooling", 2.2) * deltatime) + burn * chf("Burn/heat", 4), 2);
         f@density = f@density * (1 - chf("Smoke/dissipation", 0.5) * deltatime) + burn * chf("Smoke/soot", 0.5);
-        vector turb = curlnoise(@P, chf("Turbulence/scale", 3), @Time * 0.8);
+        vector turb = curlnoise(@P - {0, 0, 1} * @Time * 0.8, chf("Turbulence/scale", 3));
         v@vel += ({0, 0, 1} * f@temperature * chf("buoyancy", 7)
                   + turb * chf("Turbulence/strength", 4) * min(f@temperature, 1)) * deltatime;
     }
@@ -745,7 +991,7 @@ simulate {
     float rise = chf("speed", 1.2) * sqrt(@pscale / 0.03);
     float phase = @Time * chf("Wobble/rate", 9) * (0.6 + f@seed) + f@seed * 50;
     vector wobble = set(cos(phase), sin(phase), 0) * @pscale * chf("Wobble/amount", 6);
-    vector drift = curlnoise(@P, chf("drift_scale", 1.2), @Time * 0.4) * chf("drift", 0.15);
+    vector drift = curlnoise(@P + {1, 0, 0} * @Time * 0.4, chf("drift_scale", 1.2)) * chf("drift", 0.15);
     @P += (set(0, 0, rise) + wobble + drift) * deltatime;
     // merge: the smaller of two touching bubbles is swallowed by the bigger one
     int nb = nearpoint(0, @P);
@@ -1272,10 +1518,18 @@ def get(key):
 
 
 def search(text):
-    words = text.lower().split()
-    hits = []
+    """Recipes matching every word first, then those matching some of them (best first) —
+    so "attribute transfer" or a Houdini SOP name finds the closest tools even when not all words hit."""
+    words = [w for w in text.lower().replace("_", " ").split() if w]
+    if not words:
+        return list(RECIPES)
+    scored = []
     for r in RECIPES:
-        hay = " ".join([r.key, r.title, r.category, r.description, " ".join(r.tags)]).lower()
-        if all(w in hay for w in words):
-            hits.append(r)
-    return hits
+        hay = " ".join([r.key.replace("_", " "), r.title, r.category, r.description, " ".join(r.tags)]).lower()
+        title = (r.title + " " + " ".join(r.tags)).lower()
+        hit = sum(1 for w in words if w in hay)
+        if hit:
+            scored.append((hit == len(words), hit, sum(1 for w in words if w in title), r))
+    scored.sort(key=lambda x: (not x[0], -x[1], -x[2]))
+    full = [r for ok, _h, _t, r in scored if ok]
+    return full if full else [r for _ok, _h, _t, r in scored[:8]]

@@ -55,8 +55,9 @@ reg("bevel", "bevel(width [, segments])", "bevels edges (inside an if: only thos
 reg("resample", "resample(count)", "resamples curves to count points each", "Geometry operations", "g_simple",
     effect=True, node="GeometryNodeResampleCurve", gin="Curve", gout="Curve", sel="Selection",
     args=(("Count", INT, 10),), fixed={"Mode": "Count"})
-reg("sweep", "sweep(radius [, resolution, miter])",
-    "turns curves into tubes (radius may vary per point); miter=1 keeps the thickness even at sharp corners (5.3)",
+reg("sweep", "sweep(radius [, resolution, miter])  or  sweep(chobj(\"profile\") [, scale, miter])",
+    "turns curves into tubes (radius may vary per point), or sweeps a profile curve object along them like "
+    "Houdini's Sweep; miter=1 keeps the thickness even at sharp corners (5.3)",
     "Geometry operations", "g_sweep", effect=True)
 reg("tocurves", "tocurves()", "mesh edges → curves", "Geometry operations", "g_simple", effect=True,
     node="GeometryNodeMeshToCurve", gin="Mesh", gout="Curve", sel="Selection", props={"mode": "EDGES"})
@@ -295,7 +296,26 @@ class GeoOps:
         elif len(node.args) == 2:
             raise FormulaError("instance()'s index picks a child of a collection — use chcoll(\"name\")")
         orient = self.g.add("GeometryNodeInputNamedAttribute", {"data_type": "QUATERNION"}, {"Name": "orient"})
-        rot = self.switch(Val(BOOL, o=orient.out("Exists"), field=True), Val(ROTATION, c=(0.0, 0.0, 0.0)),
+        fallback = Val(ROTATION, c=(0.0, 0.0, 0.0))
+        wrote_n = getattr(self, "wrote_normal", False) or "N" in self.attr_info
+        wrote_up = "up" in self.attr_info
+        if (wrote_n or wrote_up) and "orient" not in self.attr_info:
+            # Copy to Points rule: no p@orient → +Z follows @N, and +Y turns toward v@up
+            fallback = Val(ROTATION, c=(0.0, 0.0, 0.0))
+            if wrote_n:
+                nrm = self.read_attr(self.resolve_attr("", "N"))
+                al = self.g.add("FunctionNodeAlignRotationToVector", {"axis": "Z", "pivot_axis": "AUTO"},
+                                {"Vector": self.inp(nrm, VECTOR)})
+                fallback = Val(ROTATION, o=al.out("Rotation"), field=True)
+            if wrote_up:
+                up = self.read_attr(self.resolve_attr("v", "up"))
+                al2 = self.g.add("FunctionNodeAlignRotationToVector",
+                                 {"axis": "Y", "pivot_axis": "Z" if wrote_n else "AUTO"},
+                                 {"Rotation": self.inp(fallback, ROTATION), "Vector": self.inp(up, VECTOR)})
+                fallback = Val(ROTATION, o=al2.out("Rotation"), field=True)
+            self.note("instance(): no p@orient, so instances are aligned like Houdini's Copy to Points — "
+                      "+Z along @N" + (", +Y toward v@up" if wrote_up else ""))
+        rot = self.switch(Val(BOOL, o=orient.out("Exists"), field=True), fallback,
                           Val(ROTATION, o=orient.out("Attribute"), field=True), ROTATION)
         sc = self.g.add("GeometryNodeInputNamedAttribute", {"data_type": "FLOAT_VECTOR"}, {"Name": "scale"})
         scale = self.switch(Val(BOOL, o=sc.out("Exists"), field=True), Val(VECTOR, c=(1.0, 1.0, 1.0)),
@@ -352,12 +372,18 @@ class GeoOps:
 
     def g_sweep(self, node, name):
         vals = self.args(node, name, {1, 2, 3})
-        res = self._single(self.coerce(vals[1], INT, "sweep()'s resolution"), "the resolution") if len(vals) >= 2 \
-            else Val(INT, c=12)
-        circle = self.g.add("GeometryNodeCurvePrimitiveCircle", {"mode": "RADIUS"},
-                            {"Resolution": self.inp(res, INT), "Radius": 1.0})
-        inputs = {"Profile Curve": circle.out("Curve"), "Scale": self.inp(vals[0], FLOAT, "sweep()'s radius"),
-                  "Fill Caps": True}
+        if vals[0].t == OBJECT:
+            # profile sweep: the object's curve, in its own local space, swept along these curves
+            oi = self.g.add("GeometryNodeObjectInfo", {"transform_space": "ORIGINAL"}, {"Object": vals[0].o})
+            scale = self.inp(vals[1], FLOAT, "sweep()'s scale") if len(vals) >= 2 else 1.0
+            inputs = {"Profile Curve": oi.out("Geometry"), "Scale": scale, "Fill Caps": False}
+        else:
+            res = self._single(self.coerce(vals[1], INT, "sweep()'s resolution"), "the resolution") \
+                if len(vals) >= 2 else Val(INT, c=12)
+            circle = self.g.add("GeometryNodeCurvePrimitiveCircle", {"mode": "RADIUS"},
+                                {"Resolution": self.inp(res, INT), "Radius": 1.0})
+            inputs = {"Profile Curve": circle.out("Curve"), "Scale": self.inp(vals[0], FLOAT, "sweep()'s radius"),
+                      "Fill Caps": True}
         if len(vals) == 3:
             miter = self._single(self.coerce(vals[2], BOOL, "sweep()'s miter"), "miter")
             if not (miter.is_const and not miter.c):

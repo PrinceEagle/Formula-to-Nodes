@@ -134,16 +134,23 @@ TOOLS = [
          "object": {"type": "string", "description": "Object to apply it to as a modifier, or 'active'"}},
          "required": ["script"]}},
     {"name": "formula_inspect",
-     "description": "Read evaluated attribute values of an object after its modifiers (position, your "
-                    "custom attributes...) plus any node warnings. Use it to verify a build did what you meant.",
+     "description": "Read evaluated attribute values of an object after its modifiers: mesh, point cloud, "
+                    "curve and instance attributes with min/mean/max, volume grids, node warnings and empty "
+                    "object inputs. Use it to verify a build did what you meant.",
      "inputSchema": {"type": "object", "properties": {
          "object": {"type": "string", "description": "Object name or 'active'"},
          "attributes": {"type": "array", "items": {"type": "string"},
                         "description": "Only these attributes (default: all)"},
-         "limit": {"type": "integer", "description": "Values per attribute (default 8, max 200)"}},
+         "limit": {"type": "integer", "description": "Values per attribute (default 8, max 200)"},
+         "frames": {"type": "array", "items": {"type": "integer"},
+                    "description": "Read these frames (e.g. [1, 24, 48]); the current frame is restored"},
+         "elements": {"type": "array", "items": {"type": "integer"},
+                      "description": "Read these element indices instead of the first N"}},
          "required": ["object"]}},
     {"name": "formula_set_parameters",
-     "description": "Set the parameter values (chf/chi/chv sliders) on an object's Formula modifier.",
+     "description": "Set parameters on an object's Formula modifier: sliders, vectors as [x, y, z], object / "
+                    "collection / material pickers by name, ramps by preset name. Use \"Panel/name\" when two "
+                    "inputs share a name. Valid keys are applied even if others fail.",
      "inputSchema": {"type": "object", "properties": {
          "object": {"type": "string"},
          "values": {"type": "object", "description": "{parameter name: value}; vectors as [x, y, z]"},
@@ -177,27 +184,47 @@ TOOLS = [
 ]
 
 
-def _check(script):
+_target = {"t": None, "at": 0.0}
+
+
+def _live_target(bridge):
+    """The running Blender's version (cached for 30 s), so 5.3-only features check as available."""
+    import time
+    if (_target["t"] is None or time.time() - _target["at"] > 30) and bridge is not None:
+        _target["at"] = time.time()
+        try:
+            r = bridge.call("capabilities", timeout=5)
+            ver = tuple(int(x) for x in str(r.get("blender", "")).split()[0].split(".")[:3])
+            _target["t"] = caps.Target(ver)
+        except Exception:
+            return caps.Target(caps.DEFAULT_TARGET)
+    return _target["t"] or caps.Target(caps.DEFAULT_TARGET)
+
+
+def _check(script, bridge=None):
+    target = _live_target(bridge)
     try:
-        res = compiler.compile_source(script, "SCRIPT")
+        res = compiler.compile_source(script, "SCRIPT", target=target)
     except lang.FormulaError as e:
-        return {"ok": False, "error": str(e), "line": e.line}
-    params = [{"name": s.name, "type": s.vtype.lower(), "default": s.default}
+        return {"ok": False, "error": str(e), "line": e.line, "blender": caps.version_str(target.version)}
+    params = [{"name": f"{s.panel}/{s.name}" if s.panel else s.name, "type": s.vtype.lower(), "default": s.default}
               for s in res.iface if s.key.startswith("param:") and s.vtype != "GEOMETRY"]
+    params += [{"name": name, "type": "colorramp" if kind == "color" else "ramp"} for name, kind in res.ramps]
     outputs = [s.name for s in res.iface if s.in_out == "OUTPUT"]
-    return {"ok": True, "nodes": res.node_count, "parameters": params, "outputs": outputs, "notes": res.notes}
+    return {"ok": True, "nodes": res.node_count, "parameters": params, "outputs": outputs,
+            "writes": sorted(res.attrs), "notes": res.notes, "blender": caps.version_str(target.version)}
 
 
 def call_tool(bridge, name, args):
     """Returns (data, is_error)."""
     if name == "formula_language_guide":
-        return ai.build_system_prompt(for_tools=True), False
+        return ai.build_system_prompt(for_tools=True, target=_live_target(bridge)), False
     if name == "formula_check_script":
-        r = _check(args.get("script", ""))
+        r = _check(args.get("script", ""), bridge)
         return r, not r["ok"]
     if name == "formula_build":
         script = args.get("script", "")
-        pre = _check(script)
+        pre = _check(script, bridge)
         if not pre["ok"]:
             return pre, True
         r = bridge.call("build_group", script=script, name=args.get("name") or "Formula",
@@ -205,7 +232,8 @@ def call_tool(bridge, name, args):
         return r, not r.get("ok", False)
     if name == "formula_inspect":
         r = bridge.call("inspect", object_name=args.get("object", ""), attributes=args.get("attributes") or None,
-                        limit=int(args.get("limit") or 8))
+                        limit=int(args.get("limit") or 8), frames=args.get("frames") or None,
+                        elements=args.get("elements") or None)
         return r, not r.get("ok", False)
     if name == "formula_set_parameters":
         r = bridge.call("set_parameters", object_name=args.get("object", ""), values=args.get("values") or {},

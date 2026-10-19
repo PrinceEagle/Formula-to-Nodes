@@ -85,6 +85,21 @@ wrangles) and compiles into a Blender Geometry Nodes group.
 OUTPUT FORMAT
 - Reply with exactly one fenced code block containing the whole script, nothing else.
 
+COMING FROM HOUDINI (read this first)
+- Blender is Z-UP: gravity is {0, 0, -9.81}, "up" is {0, 0, 1}.
+- @Time is seconds = frame / fps (frame 1 → 1/fps, not 0). @Frame is the frame. $F/$T don't exist:
+  use @Frame / @Time. @TimeInc = seconds per frame (deltatime inside simulate { }).
+- Unprefixed unknown attributes are floats, as in VEX. Known ones keep their type: @P @N @v @Cd @up
+  @orient @scale @age @life @dead @force ...
+- Groups are bool attributes: @group_top ↔ b@top; inpointgroup/inprimgroup, setpointgroup/setprimgroup.
+- Connectivity's @class is @island (built in). Resample's @curveu is @curveparam.
+- instance() is Copy to Points: p@orient, else +Z along @N and +Y toward v@up; @pscale and v@scale.
+- PolyExtrude → extrude(); PolyBevel → bevel(); Sweep → sweep(radius) or sweep(chobj("profile"));
+  attribute transfer → nearpoint(1, @P) + point(1, "Cd", pt), or primuv(1, "Cd", @P).
+- No point-cloud handles (pcopen/nearpoints arrays): use nearpoint(), blur(), avgof(value, group).
+- Volume Wrangle: volumebounds(min, max, voxelsize) then runover(voxel) { f@density = ...; }.
+- Easing: easein easeout easeinout easeoutback easeoutelastic easeoutbounce (t clamped to 0..1).
+
 WHERE LINES RUN (like a wrangle's Run Over menu)
 - By default every line runs once per point. Put one of these on the first line to change it:
   #runover prim (faces)   #runover vertex (face corners)   #runover edge   #runover curve
@@ -110,7 +125,7 @@ STATEMENTS (end with ';' or a newline; // and /* */ comments)
 
 ATTRIBUTES
 - Prefixes: f@ float, i@ int, b@ bool, v@ vector, p@ rotation (quaternion), 4@ matrix,
-  c@ colour, u@ 2D vector. Always prefix custom attributes.
+  c@ colour, u@ 2D vector. Prefix custom attributes (unprefixed unknown names are floats).
 - Built-ins: @P @N @id @pscale (radius) @Cd (colour) @uv @orient @scale @rest @v (velocity)
   @Time @Frame; read-only: @area @island @edgeangle @curveparam @curvelength @tangent.
 - Writable: @P @N @id @pscale @Cd @uv @orient @scale @material_index f@tilt.

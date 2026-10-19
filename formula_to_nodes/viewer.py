@@ -442,8 +442,8 @@ def _draw_card(context, s):
 
     # header: name + status chip
     from . import ui as _ui
-    target = _ui.active_formula_group(context.space_data) if s.replace_active else None
-    title = target.node_tree.name if target else (s.group_name or "Formula")
+    target = _ui.target_tree(context.space_data) if s.replace_active else None
+    title = target.name if target else (s.group_name or "Formula")
     if res is not None:
         chip, ccol = f"✓ {res.node_count} nodes", OK
     elif err is not None:

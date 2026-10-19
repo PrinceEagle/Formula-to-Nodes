@@ -119,6 +119,18 @@ reg("setprimattrib", 'setprimattrib(geo, "name", primnum, value [, "set"|"add"])
     "write a face attribute (this face, or one fixed face)", "Effects", "f_setelemattrib", effect=True,
     domain="FACE")
 
+# Houdini groups are bool attributes in Blender: a group called "top" is b@top
+reg("inpointgroup", 'inpointgroup(geo, "group", ptnum)', "1 if the point is in the group (a bool attribute)",
+    "Geometry", "f_ingroup", domain="POINT", base="point")
+reg("inprimgroup", 'inprimgroup(geo, "group", primnum)', "1 if the face is in the group (a bool attribute)",
+    "Geometry", "f_ingroup", domain="FACE", base="prim")
+reg("setpointgroup", 'setpointgroup(geo, "group", ptnum, value)',
+    "put the point in (1) or out of (0) a group — stored as the bool attribute b@group", "Effects",
+    "f_setgroup", effect=True, domain="POINT", base="setpointattrib")
+reg("setprimgroup", 'setprimgroup(geo, "group", primnum, value)',
+    "put the face in (1) or out of (0) a group — stored as the bool attribute b@group", "Effects",
+    "f_setgroup", effect=True, domain="FACE", base="setprimattrib")
+
 
 def _domain_word(d):
     return {"POINT": "point", "FACE": "prim", "CORNER": "vertex", "EDGE": "edge", "CURVE": "curve",
@@ -265,6 +277,26 @@ class GeoFuncs:
         index = self.coerce(self.expr(idx), INT, f"{name}()'s index")
         return self.sample_index(geo, value, index, domain, spec[2], spec[3])
 
+    def _group_call(self, node, name, nargs):
+        if len(node.args) not in nargs:
+            raise FormulaError(f"{FUNCS[name].sig}")
+        group = self.str_const(node.args[1], f"{name}()'s group name").strip()
+        if not group.isidentifier():
+            raise FormulaError(f'{name}(): "{group}" isn\'t a valid group name (letters, digits, _)')
+        args = list(node.args)
+        args[1] = ast.Constant("b@" + group)
+        return ast.Call(func=ast.Name(FUNCS[name].data["base"], ast.Load()), args=args[:4], keywords=[])
+
+    def f_ingroup(self, node, name):
+        call = self._group_call(node, name, (3,))
+        return self.f_point(call, FUNCS[name].data["base"])
+
+    def f_setgroup(self, node, name):
+        call = self._group_call(node, name, (4,))
+        call.args[3] = ast.Call(func=ast.Name("bool", ast.Load()), args=[node.args[3]], keywords=[]) \
+            if "bool" in FUNCS else node.args[3]
+        return self.f_setelemattrib(call, FUNCS[name].data["base"])
+
     def f_detail(self, node, name):
         if len(node.args) not in (2, 3):
             raise FormulaError('detail() takes 2 or 3 arguments: detail(0, "name" [, default])')
@@ -296,6 +328,7 @@ class GeoFuncs:
         text = self.str_const(node.args[1], "the attribute name").strip()
         from .compiler import VEX_ALIASES, BUILTIN_ATTRS
         raw = text.rpartition("@")[2]
+        self.reads_checked.add(VEX_ALIASES.get(raw, raw))
         if VEX_ALIASES.get(raw, raw) in BUILTIN_ATTRS:
             return Val(BOOL, c=True)
         n = self.g.add("GeometryNodeInputNamedAttribute", {"data_type": "FLOAT"}, {"Name": raw})

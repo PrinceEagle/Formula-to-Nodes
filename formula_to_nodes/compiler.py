@@ -130,7 +130,8 @@ class _FnCtx:
 
 VEX_ALIASES = {"P": "position", "N": "normal", "pscale": "radius", "v": "velocity",
                "Frame": "frame", "Time": "time", "Cd": "Cd", "rest": "rest_position",
-               "material": "material_index", "matindex": "material_index"}
+               "material": "material_index", "matindex": "material_index",
+               "curveu": "curveparam"}       # Houdini's Resample/Sweep curveu is Blender's spline factor
 
 ALIAS_TYPES = {"P": VECTOR, "N": VECTOR, "v": VECTOR, "pscale": FLOAT, "Cd": VECTOR, "rest": VECTOR,
                "Frame": FLOAT, "Time": FLOAT, "material": INT, "matindex": INT}
@@ -162,7 +163,20 @@ NON_FIELD_BUILTINS = {"frame", "time"}
 NAMED_ATTR_TYPES = {"rest_position": VECTOR, "velocity": VECTOR, "orient": ROTATION, "rotation": ROTATION,
                     "scale": VECTOR, "Cd": VECTOR, "Alpha": FLOAT, "uv": VECTOR, "age": FLOAT, "life": FLOAT,
                     "mass": FLOAT, "density": FLOAT, "temperature": FLOAT, "width": FLOAT,
-                    "transform": MATRIX, "up": VECTOR, "nurbs_weight": FLOAT, "nurbs_order": INT}
+                    "transform": MATRIX, "up": VECTOR, "nurbs_weight": FLOAT, "nurbs_order": INT,
+                    # Houdini POP / SOP attributes, so unprefixed @dead, @force ... have their VEX types
+                    "dead": INT, "pstate": INT, "force": VECTOR, "accel": VECTOR, "drag": FLOAT,
+                    "spinshape": FLOAT, "w": VECTOR, "angvel": VECTOR, "torque": VECTOR, "nage": FLOAT,
+                    "pivot": VECTOR, "trans": VECTOR, "center": VECTOR, "fuel": FLOAT, "heat": FLOAT,
+                    "flame": FLOAT, "Alpha_": FLOAT}
+# reading these without ever writing them is almost always a Houdini habit: say what Blender calls it
+HOUDINI_ATTR_HINTS = {
+    "class": "Houdini's Connectivity 'class' is @island here (built in, no node needed)",
+    "name": "piece names: use @island for connected pieces, or an int attribute you set",
+    "uv": "UVs are corner (vertex) data here — read them with v@uv in #runover vertex",
+    "TimeInc": "use deltatime inside simulate { } (or @TimeInc)",
+    "Cd": None,
+}
 NAMED_STORE = {"Cd": COLOR, "uv": FLOAT2}
 NAMED_STORAGE_NAME = {"uv": "UVMap"}
 INDEX_ALIASES = {"ptnum": "pt", "primnum": "prim", "vtxnum": "vtx", "elemnum": "elem",
@@ -217,6 +231,13 @@ UNSUPPORTED = {
     "chramp3": "use chramp() — assign it to a vector to get a colour ramp",
     "intersect_all": "only the first hit is available — use intersect()",
     "volumeindex": "use volumesample() — grids are sampled at positions",
+    "polybevel": "use bevel(width, segments)",
+    "polyextrude": "use extrude(distance [, inset]) — inside if (...) { } it extrudes only those faces",
+    "attribtransfer": "use nearpoint(1, @P) with point(1, \"Cd\", pt), or primuv(1, \"Cd\", @P) for the surface",
+    "addpointgroup": "groups are bool attributes here — write b@name = 1",
+    "npointsgroup": "count a group with sumof(b@name)",
+    "expandpointgroup": "groups are bool attributes here — test b@name",
+    "fit10": "use fit(x, 1, 0, a, b)",
 }
 
 
@@ -283,6 +304,8 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
         self._noted = set()
         self.params = {}          # key → IfaceSocket (first-use order)
         self.attr_info = {}       # attribute name → (type, storage type, domain) written by this script
+        self.reads_unwritten = {}  # attribute name → first line it was read before (or without) a write
+        self.reads_checked = set()  # names tested with has*attrib() — reading those is deliberate
         self.detail_attrs = {}    # detail attribute name → type
         self.reads = {}           # name → sorted statement ids that read it
         self.zone_limit = float("inf")
@@ -319,6 +342,11 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
             raise FormulaError("the script is empty")
         prog = parse_source(source, self.resolver)
         self.functions = prog.functions
+        code = re.sub(r"//[^\n]*", "", source)
+        m = re.search(r"\{\s*0(?:\.0*)?\s*,\s*(-\s*9\.8\d*)\s*,\s*0(?:\.0*)?\s*\}", code)
+        if m:
+            self.note(f"{{0, {m.group(1).replace(' ', '')}, 0}} points sideways here — Blender is Z-up, so "
+                      f"gravity is {{0, 0, -9.81}}")
         if prog.runover:
             self.default_domain = prog.runover
         stmts = prog.stmts
@@ -356,6 +384,19 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
 
     def _finish(self, mode):
         self._flush_effects(self.root_ctx)
+        if self.default_domain != "VOXEL" and any(n in self.attr_info for n in ("density", "temperature", "fuel")) \
+                and not any("Grid" in n.idname or "Volume" in n.idname for n in self.g.nodes):
+            self.notes.append("@density / @temperature were written per point — for a volume (like a Volume "
+                              "Wrangle) use volumebounds(min, max, voxelsize) and runover(voxel) { ... }")
+        for name, line in self.reads_unwritten.items():
+            if name in self.attr_info or name in NAMED_ATTR_TYPES or name in self.reads_checked \
+                    or name in ("UVMap", "sharp_face", "sharp_edge"):
+                continue
+            hint = HOUDINI_ATTR_HINTS.get(name)
+            where = f"Line {line}: " if line else ""
+            msg = (f"{where}@{name} is read but this script never writes it — it's 0 unless the input "
+                   f"geometry already has an attribute called '{name}'")
+            self.notes.append(msg + (f". {hint}" if hint else ""))
         wrote = self.root_ctx.geo is not self.geo_in
         if not wrote and self.return_val is None and not self.keep:
             raise FormulaError("nothing to build — assign to an attribute (f@name = ...) or return a value")
@@ -556,6 +597,10 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
         return fd is not None and fd.effect
 
     def s_expr(self, s):
+        v = s.value
+        if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id not in self.functions \
+                and v.func.id not in FUNCS:
+            self.expr(v)        # raises "unknown function ... did you mean"
         if not self._is_effect_stmt(s):
             raise FormulaError(
                 f"'{s.text}' doesn't do anything — assign it to an attribute "
@@ -751,6 +796,7 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
             if dom not in ("POINT", "FACE", "CORNER"):
                 raise FormulaError(f"custom normals can be set per point, face or vertex — not per {DOMAIN_WORD[dom]}")
             v = value if sel is None else self.switch(sel, self.read_attr(attr), value, VECTOR)
+            self.wrote_normal = True
             node = self.g.add("GeometryNodeSetMeshNormal", {"mode": "FREE", "domain": dom},
                               {"Mesh": geo, "Custom Normal": self.inp(v, VECTOR)}, pure=False, label=label)
             self.ctx.geo = node.out("Mesh")
@@ -1668,6 +1714,13 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
             return self.resolve_voxel_attr(prefix, raw, write)
         if raw in INDEX_ALIASES:
             return Attr(INDEX_ALIASES[raw], INT, "index_of")
+        if raw == "TimeInc":
+            if write:
+                raise FormulaError("@TimeInc is read-only")
+            return Attr("TimeInc", FLOAT, "timeinc", field=False)
+        if raw.startswith("group_") and len(raw) > 6 and prefix in ("", "i", "b"):
+            # Houdini groups are bool attributes in Blender: @group_top ↔ b@top
+            return self.resolve_attr("b", raw[6:], write)
         if raw in COUNT_ALIASES:
             return Attr(raw, INT, "count", field=False)
         name = VEX_ALIASES.get(raw, raw)
@@ -1721,14 +1774,24 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
         if self.strict:
             raise FormulaError(f"give '@{raw}' a type prefix: f@{raw} (float), v@{raw} (vector), "
                                f"i@{raw} (int), b@{raw} (bool), p@{raw} (rotation)")
-        self.note(f"'@{raw}' has no type prefix, so it's a vector attribute — write f@{raw} for a float")
-        return VECTOR
+        # VEX rule: an unknown attribute without a prefix is a float
+        return FLOAT
 
     def read_attr(self, a):
         if a.kind in ("voxel", "voxel_index"):
             return self.read_voxel_attr(a)
         if a.kind == "const":
             return Val(VECTOR, c=(0.0, 0.0, 1.0))
+        if a.kind == "timeinc":
+            c = self.ctx
+            while c is not None:
+                if "deltatime" in c.reserved:
+                    return c.reserved["deltatime"]
+                c = c.parent
+            st = self.g.add("GeometryNodeInputSceneTime")
+            sec, fr = Val(FLOAT, o=st.out("Seconds")), Val(FLOAT, o=st.out("Frame"))
+            per = self.math("DIVIDE", sec, fr)          # seconds per frame = 1 / fps
+            return self.switch(self.compare("EQUAL", fr, Val(FLOAT, c=0.0)), per, Val(FLOAT, c=1.0 / 24.0))
         if a.kind == "count":
             dom = COUNT_ALIASES[a.name] or self.field_domain()
             if a.name == "numprim" and self.domain == "CURVE":
@@ -1750,6 +1813,8 @@ class Compiler(MathFuncs, NoiseFuncs, GeoFuncs, XformFuncs, TextFuncs, ListFuncs
                 self.uses.add("pscale")
             return Val(a.t, o=n.out(a.sock), field=a.field)
         store = a.store or (self.attr_info.get(a.name, (None, None))[1])
+        if a.name not in self.attr_info:
+            self.reads_unwritten.setdefault(a.name, self.cur_line)
         dtype = READ_DTYPE[store] if store in (COLOR, FLOAT2) else READ_DTYPE[a.t]
         n = self.g.add("GeometryNodeInputNamedAttribute", {"data_type": dtype}, {"Name": a.name})
         if a.name == "radius":

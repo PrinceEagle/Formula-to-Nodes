@@ -1,3 +1,51 @@
+# Formula to Nodes 3.2.0 — Live Viewer, Houdini-friendly
+
+Shaped by usability sessions with three Houdini artists (FX TD, environment/modeling,
+motion design) on Blender 5.3.
+
+## Live Viewer
+- A node card drawn in the Geometry Node Editor while you write: outputs, inputs with defaults
+  and panels, node count, or the error with its line. Recompiles only when the text changes.
+- Live values: min / avg / max of the attributes the script writes on the active object
+  (mesh, points, curves and instances), element counts, NaN/inf warnings.
+- Sidebar toggles: Viewer, Values, corner.
+
+## Friendlier editing
+- **Open in Text Editor** (split next to the nodes) and **Ctrl+Enter** in the Text Editor builds.
+- Building inside a Formula group updates it in place (no stray new group).
+- Asks before a rebuild that would replace the selected group with a different script, overwrite
+  hand edits to its nodes, or cut links to sockets that go away.
+- Every replaced script is kept in a *Formula Recovery* text datablock.
+- **Save as Preset** / *Recipes › My Presets* (stored in your Blender config, with a backup).
+
+## Houdini habits
+- Unknown unprefixed attributes are floats (VEX rule); `@age @life @dead @force @accel @drag @pstate`
+  and friends have their POP types. `@TimeInc` = deltatime in a sim, seconds per frame outside.
+- Groups as bool attributes: `@group_name`, `inpointgroup / inprimgroup / setpointgroup / setprimgroup`.
+- `@curveu` → `@curveparam`; reading `@class` (or any attribute nothing writes) explains what it reads.
+- `$F`, `$T`… give an HScript hint; `{0, -9.8, 0}` notes Blender is Z-up; per-point `@density` notes
+  `runover(voxel)`; `ch()` without a default notes it starts at 0.
+- Unknown statement calls (`polybevel()`) say "unknown function" with the Blender equivalent.
+- `instance()` without `p@orient` aligns +Z to `@N` and +Y to `v@up` (Copy to Points).
+- Easing: `easein easeout easeinout easeoutback easeoutelastic easeoutbounce`.
+- `sweep(chobj("profile") [, scale])` sweeps a profile curve. `radians()/degrees()` take vectors.
+
+## Presets (91 recipes, new "From Houdini" column)
+- From Houdini: Attribute Transfer, Group Expression, PolyExtrude a group, Connectivity, Sweep a
+  profile curve, Mountain, Peak, Measure, Attribute Noise, Copy to Points prep, Point Relax.
+- POP Source + forces, Age to colour & size, Stagger in, Random effector, Step & cascade,
+  Radial cloner.
+- Recipe search ranks partial matches, so SOP names find the closest tools.
+- Fixed: smoke recipes passed time as curl-noise detail; particles now use `@v` (Blender velocity).
+
+## Claude / MCP
+- `formula_set_parameters`: object/collection/material pickers by name, `"Panel/name"` paths,
+  ramp presets, and partial success.
+- `formula_inspect`: instances, volume grids, min/mean/max, `frames=[…]`, `elements=[…]`,
+  empty object inputs flagged.
+- Language guide and checks use the running Blender's version (5.3 features no longer reported
+  missing); parameters listed with panel paths and ramps.
+
 # Formula to Nodes 3.1.0 — Blender 5.3
 
 Volumes, real fluid solvers and the new Blender 5.3 nodes. Still works on 5.2 (features that need

@@ -93,6 +93,18 @@ def active_formula_group(space):
     return None
 
 
+def target_tree(space):
+    """The Formula group a build would update: the selected Formula node's group, else the group being
+    edited when it is itself a Formula group (you're inside it). None → a new group is made."""
+    node = active_formula_group(space)
+    if node is not None:
+        return node.node_tree
+    tree = space.edit_tree if space else None
+    if tree is not None and build.is_formula_group(tree) and tree.library is None:
+        return tree
+    return None
+
+
 def tag_redraw_node_editors():
     wm = bpy.context.window_manager
     for win in wm.windows:
@@ -114,10 +126,9 @@ def compile_options():
 def rebuild_risks(context, space, source, mode, output):
     """Reasons to ask before building: things the user could lose. [] when it's safe."""
     s = settings(context)
-    target = active_formula_group(space) if s.replace_active else None
-    if target is None:
+    tree = target_tree(space) if s.replace_active else None
+    if tree is None:
         return []
-    tree = target.node_tree
     risks = []
     if mode == "SCRIPT" and s.script_origin != "group:" + tree.name and tree.get(build.SOURCE_KEY, "") != source:
         risks.append(f"This replaces the selected group '{tree.name}' with a different script "
@@ -153,10 +164,10 @@ def compile_and_build(context, space, source, mode, output, report):
         report({"ERROR"}, str(e))
         return False
 
-    target_node = active_formula_group(space) if s.replace_active else None
+    target = target_tree(space) if s.replace_active else None
     try:
-        if target_node:
-            tree = build.build_group(result, source, mode, output, target=target_node.node_tree, version=VERSION)
+        if target is not None:
+            tree = build.build_group(result, source, mode, output, target=target, version=VERSION)
             verb = "Updated"
         else:
             tree = build.build_group(result, source, mode, output, name=s.group_name or "Formula", version=VERSION)
@@ -242,7 +253,7 @@ class FORMULA_PG_Settings(PropertyGroup):
     ref_category: EnumProperty(name="Category", items=_ref_items)
 
     show_viewer: BoolProperty(
-        name="Live Viewer",
+        name="Viewer",
         description="Draw the node your script becomes in the node editor — inputs, outputs, errors — "
                     "updated as you type",
         default=True, update=lambda self, ctx: (viewer.invalidate(), tag_redraw_node_editors()))
@@ -391,11 +402,11 @@ class FORMULA_OT_LoadActive(_GeoEditorOp, Operator):
 
     @classmethod
     def poll(cls, context):
-        return active_formula_group(geo_space(context)) is not None
+        return target_tree(geo_space(context)) is not None
 
     def execute(self, context):
         s = settings(context)
-        tree = active_formula_group(geo_space(context)).node_tree
+        tree = target_tree(geo_space(context))
         src = tree[build.SOURCE_KEY]
         if tree.get(build.MODE_KEY) == "FORMULA" and "\n" not in src:
             s.formula = src
@@ -600,6 +611,11 @@ class FORMULA_OT_EditInTextEditor(_GeoEditorOp, Operator):
         sp.show_line_numbers = True
         sp.show_syntax_highlight = True
         sp.show_word_wrap = False
+        sp.top = 0
+        try:
+            text.cursor_set(0, character=0)
+        except (AttributeError, TypeError):
+            pass
         viewer.invalidate()
         self.report({"INFO"}, "Write on the left; the viewer shows the node on the right. Ctrl+Enter builds")
         return {"FINISHED"}
@@ -894,6 +910,7 @@ class FORMULA_MT_Examples(Menu):
 class FORMULA_MT_Recipes(Menu):
     bl_idname = "FORMULA_MT_recipes"
     bl_label = "Recipes"
+    bl_options = {"SEARCH_ON_KEY_PRESS"}     # just start typing, e.g. "transfer"
 
     def draw(self, context):
         flow = self.layout.column_flow(columns=4)
@@ -953,10 +970,10 @@ class FORMULA_PT_Panel(_PanelBase, Panel):
         sub.prop(s, "viewer_values", toggle=True, icon="SPREADSHEET")
         sub.prop(s, "viewer_corner", text="")
 
-        node = active_formula_group(geo_space(context))
-        if node:
+        tgt = target_tree(geo_space(context))
+        if tgt is not None:
             row = layout.row(align=True)
-            row.label(text=f"Selected: {node.node_tree.name}", icon="NODETREE")
+            row.label(text=f"Updates: {tgt.name}", icon="NODETREE")
             row.operator("node.formula_load_active", text="Edit", icon="GREASEPENCIL")
 
         box = layout.box()

@@ -84,6 +84,10 @@ class ParamFuncs:
             raise FormulaError(f'{name}() takes a name and one default: {FUNCS[name].sig}')
         if "default" in kw:
             default = const_of(kw["default"], t, "the default")
+        if default is None and t in (FLOAT, INT, VECTOR):
+            example = {FLOAT: "1", INT: "1", VECTOR: "{0, 0, 1}"}[t]
+            self.note(f'{name}("{pname}") has no default, so it starts at 0 — give one, e.g. '
+                      f'{name}("{pname}", {example})')
         if default is None and t in (FLOAT, INT, BOOL, VECTOR, STRING, ROTATION):
             default = {FLOAT: 0.0, INT: 0, BOOL: False, VECTOR: (0.0, 0.0, 0.0), STRING: "",
                        ROTATION: (0.0, 0.0, 0.0)}[t]
